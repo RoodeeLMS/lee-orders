@@ -31,10 +31,12 @@ function menuSummaryTable() {
 function customerTable() {
   const codes = DATA.displayColumns;
   const head = codes.map((c) => `<th class="num">${esc(c)}</th>`).join('');
-  const body = DATA.orders.map((o, i) => {
+  // sort by postal code (ascending); keep original index for the popup mapping
+  const ordered = DATA.orders.map((o, i) => ({ o, i })).sort((a, b) => String(a.o.zip || '').localeCompare(String(b.o.zip || '')));
+  const body = ordered.map(({ o, i }, n) => {
     const cells = codes.map((c) => `<td class="num">${o.items[c] ? o.items[c] : '<span class="dot">·</span>'}</td>`).join('');
     const note = o.note ? `<div class="row-note">📝 ${esc(o.note)}</div>` : '';
-    return `<tr class="cust-row" data-kind="order" data-i="${i}"><td class="num idx">${i + 1}</td><td class="user">@${esc(o.user)}${note}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td><td class="slip">📋</td></tr>`;
+    return `<tr class="cust-row" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td><td class="slip">📋</td></tr>`;
   }).join('');
   const totals = tally(DATA.orders, codes);
   const totalRow = codes.map((c) => `<th class="num">${totals[c] || 0}</th>`).join('');
@@ -204,7 +206,7 @@ async function main() {
       </div>
       <p class="hint">💡 แตะที่แถวลูกค้าเพื่อเปิด <strong>ใบสรุป (ป๊อปอัพ)</strong> สำหรับแคปหน้าจอส่งลูกค้า</p>
       <section class="block"><h3>✅ สรุปยอดแต่ละเมนู</h3>${summary.html}<p class="muted small">* ยอดยังไม่รวมค่าจัดส่ง</p></section>
-      <section class="block"><h3>👥 รายละเอียดรายคน (${DATA.orders.length}) — แตะเพื่อดูใบสรุป</h3>${customerTable()}</section>
+      <section class="block"><h3>👥 รายละเอียดรายคน (${DATA.orders.length}) · เรียงตามรหัสไปรษณีย์ — แตะเพื่อดูใบสรุป</h3>${customerTable()}</section>
       ${captionSection()}
       ${DATA.notes && DATA.notes.length ? `<section class="block"><h3>📝 หมายเหตุ</h3><ul class="notes">${DATA.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></section>` : ''}
     </main>
