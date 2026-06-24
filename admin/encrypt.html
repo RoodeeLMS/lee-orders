@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Admin · เข้ารหัส/ถอดรหัสออเดอร์</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/css/styles.css" />
+  <style>
+    .tool { max-width: 860px; margin: 0 auto; padding: 24px 16px 60px; }
+    .tool textarea { width: 100%; min-height: 220px; font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: .85rem; background: var(--surface-2); color: var(--text); border: 1px solid var(--line);
+      border-radius: 12px; padding: 12px; resize: vertical; }
+    .tool .field { margin: 14px 0; }
+    .tool label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 6px; }
+    .tool input[type=text], .tool input[type=password] { width: 100%; padding: 10px 12px;
+      background: var(--surface-2); color: var(--text); border: 1px solid var(--line); border-radius: 10px; }
+    .tool .btnrow { display: flex; gap: 10px; flex-wrap: wrap; }
+    .tool button { padding: 11px 16px; font-weight: 600; border: 0; border-radius: 10px; cursor: pointer;
+      background: linear-gradient(135deg, var(--accent-2), var(--accent)); color: #1a1205; }
+    .tool button.ghost { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
+    .tool .msg { font-size: .85rem; margin-top: 10px; min-height: 1.2em; }
+    .tool .msg.err { color: var(--red); }
+    .tool .msg.ok { color: var(--green); }
+    .tool h1 { font-size: 1.3rem; }
+    .tabs { display: flex; gap: 8px; margin: 8px 0 4px; }
+    .tabs button { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
+    .tabs button.active { background: var(--accent); color: #1a1205; border-color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="tool">
+    <p><a href="../index.html">‹ กลับหน้าเว็บ</a></p>
+    <h1>🔐 เครื่องมือเข้ารหัส / ถอดรหัสออเดอร์</h1>
+    <p class="muted small">ทำงานในเบราว์เซอร์ล้วน ไม่มีการส่งข้อมูลออกไปไหน · ใช้รหัสผ่านเดียวกับเว็บ</p>
+
+    <div class="tabs">
+      <button id="tabEnc" class="active">เข้ารหัส (plaintext → .enc.json)</button>
+      <button id="tabDec" class="ghost">ถอดรหัส (.enc.json → plaintext)</button>
+    </div>
+
+    <div class="field">
+      <label>รหัสผ่าน</label>
+      <input type="password" id="pw" placeholder="รหัสผ่าน" />
+    </div>
+    <div class="field">
+      <label id="inLabel">วาง JSON (plaintext)</label>
+      <textarea id="input" placeholder='{ "id": "...", "orders": [ ... ] }'></textarea>
+    </div>
+    <div class="btnrow">
+      <button id="run">เข้ารหัส</button>
+      <button id="copy" class="ghost">คัดลอกผลลัพธ์</button>
+      <button id="download" class="ghost">ดาวน์โหลดไฟล์</button>
+    </div>
+    <p id="msg" class="msg"></p>
+    <div class="field">
+      <label id="outLabel">ผลลัพธ์ (.enc.json)</label>
+      <textarea id="output" readonly></textarea>
+    </div>
+    <div class="field">
+      <label>ชื่อไฟล์สำหรับดาวน์โหลด</label>
+      <input type="text" id="fname" value="data/orders/YYYY-order.enc.json" />
+    </div>
+  </div>
+
+  <script type="module">
+    import { encryptText, decryptBlob } from '../assets/js/crypto.js';
+    const $ = (id) => document.getElementById(id);
+    let mode = 'enc';
+
+    function setMode(m) {
+      mode = m;
+      $('tabEnc').classList.toggle('active', m === 'enc');
+      $('tabEnc').classList.toggle('ghost', m !== 'enc');
+      $('tabDec').classList.toggle('active', m === 'dec');
+      $('tabDec').classList.toggle('ghost', m !== 'dec');
+      $('run').textContent = m === 'enc' ? 'เข้ารหัส' : 'ถอดรหัส';
+      $('inLabel').textContent = m === 'enc' ? 'วาง JSON (plaintext)' : 'วางเนื้อหา .enc.json (base64)';
+      $('outLabel').textContent = m === 'enc' ? 'ผลลัพธ์ (.enc.json)' : 'ผลลัพธ์ (JSON)';
+      $('output').value = '';
+      $('msg').textContent = '';
+    }
+    $('tabEnc').onclick = () => setMode('enc');
+    $('tabDec').onclick = () => setMode('dec');
+
+    function say(text, ok) { const m = $('msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
+
+    $('run').onclick = async () => {
+      const pw = $('pw').value.trim();
+      const inp = $('input').value.trim();
+      if (!pw) return say('กรอกรหัสผ่านก่อน');
+      if (!inp) return say('วางข้อมูลก่อน');
+      try {
+        if (mode === 'enc') {
+          JSON.parse(inp); // validate
+          $('output').value = await encryptText(inp, pw);
+          say('เข้ารหัสสำเร็จ ✓ คัดลอก/ดาวน์โหลดไปวางใน repo ได้เลย', true);
+        } else {
+          const json = await decryptBlob(inp, pw);
+          $('output').value = JSON.stringify(JSON.parse(json), null, 2);
+          say('ถอดรหัสสำเร็จ ✓', true);
+        }
+      } catch (e) {
+        say(e.name === 'OperationError' ? 'รหัสผ่านไม่ถูกต้อง หรือข้อมูลเสียหาย' : ('ผิดพลาด: ' + e.message));
+      }
+    };
+
+    $('copy').onclick = async () => {
+      if (!$('output').value) return;
+      await navigator.clipboard.writeText($('output').value);
+      say('คัดลอกแล้ว ✓', true);
+    };
+
+    $('download').onclick = () => {
+      const v = $('output').value;
+      if (!v) return say('ยังไม่มีผลลัพธ์');
+      const name = ($('fname').value.trim() || 'output.txt').split('/').pop();
+      const blob = new Blob([v], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+  </script>
+</body>
+</html>

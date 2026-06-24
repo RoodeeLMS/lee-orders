@@ -1,0 +1,6 @@
+# Never commit plaintext order data to this PUBLIC repo.
+data-src/
+*.plain.json
+*.local.json
+.DS_Store
+node_modules/
