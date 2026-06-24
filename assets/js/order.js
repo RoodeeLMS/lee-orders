@@ -54,6 +54,17 @@ function captionSection() {
   return `<section class="block"><h3>📌 ออเดอร์ในแคปชัน (ไม่ใช่คอมเมนต์)</h3><table class="tbl"><thead><tr><th>ผู้สั่ง</th><th>ปณ.</th><th>รายการ</th><th class="num">ยอด</th><th></th></tr></thead><tbody>${rows}</tbody><tfoot><tr><th colspan="3">รวมแคปชัน</th><th class="num">${baht(capTotal)}</th><th></th></tr></tfoot></table></section>`;
 }
 
+/* ---------- shipping (auto-default by postal code) ---------- */
+// กทม.+ปริมณฑล (BKK + นนทบุรี/ปทุมธานี/สมุทรปราการ/นครปฐม/สมุทรสาคร) ship cheaper; ต่างจังหวัด is cold-courier.
+// All values are overridable per round via DATA, and the amount stays editable in the popup.
+function shippingZone(order) {
+  const metro = DATA.shippingMetroPrefixes || ['10', '11', '12', '73', '74'];
+  if (!order.zip) return { fee: DATA.shippingDefault ?? 100, label: 'ไม่ระบุ ปณ. — ตรวจสอบ', auto: false };
+  if (metro.includes(order.zip.slice(0, 2)))
+    return { fee: DATA.shippingBkk ?? DATA.shippingDefault ?? 100, label: 'กทม./ปริมณฑล', auto: true };
+  return { fee: DATA.shippingUpcountry ?? 250, label: 'ต่างจังหวัด', auto: true };
+}
+
 /* ---------- per-customer popup ---------- */
 function buildMessage(order, shipping) {
   const lines = [];
@@ -114,7 +125,8 @@ function renderMsgCard(order, shipping) {
 }
 
 function openPopup(order) {
-  let shipping = DATA.shippingDefault ?? 100;
+  const zone = shippingZone(order);
+  let shipping = zone.fee;
 
   const modal = document.createElement('div');
   modal.className = 'modal';
@@ -128,7 +140,7 @@ function openPopup(order) {
       <div class="msg-card" id="shotCard">${renderMsgCard(order, shipping)}</div>
 
       <div class="modal-controls">
-        <label class="ship-field">ค่าส่ง (บาท)
+        <label class="ship-field">ค่าส่ง (บาท) <span class="ship-zone">· ${zone.auto ? 'auto: ' : ''}${esc(zone.label)}</span>
           <input type="number" id="shipInput" value="${shipping}" min="0" step="10" />
         </label>
         <button class="btn-copy" id="copyBtn">📋 คัดลอกข้อความ</button>
