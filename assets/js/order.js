@@ -1,102 +1,175 @@
-// Order detail page: loads + decrypts one order file and renders the summary.
+// Order detail page: loads + decrypts one order file, renders the summary,
+// and shows a per-customer popup (screenshot-ready message for Khun Lee to send).
 import { requireUnlock, getPassword, lock, decryptBlob } from './gate.js';
 
-const baht = (n) => '฿' + Number(n || 0).toLocaleString('en-US');
+const fmt = (n) => Number(n || 0).toLocaleString('en-US');
+const baht = (n) => '฿' + fmt(n);
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-function priceMap(menu) {
-  const m = {};
-  for (const item of menu) m[item.code] = item.price;
-  return m;
-}
+let DATA = null;
+let PRICES = {};
 
-function rowTotal(items, prices) {
-  let t = 0;
-  for (const k in items) t += (items[k] || 0) * (prices[k] || 0);
-  return t;
-}
+function priceMap(menu) { const m = {}; for (const it of menu) m[it.code] = it.price; return m; }
+function shortName(code) { const m = DATA.menu.find((x) => x.code === code); return m ? (m.short || m.name) : code; }
+function rowTotal(items) { let t = 0; for (const k in items) t += (items[k] || 0) * (PRICES[k] || 0); return t; }
+function tally(orders, codes) { const c = {}; codes.forEach((k) => (c[k] = 0)); for (const o of orders) for (const k in o.items) c[k] = (c[k] || 0) + o.items[k]; return c; }
 
-function tally(orders, codes) {
-  const counts = {};
-  codes.forEach((c) => (counts[c] = 0));
-  for (const o of orders) for (const k in o.items) counts[k] = (counts[k] || 0) + o.items[k];
-  return counts;
-}
-
-function menuSummaryTable(data, prices) {
-  const codes = data.displayColumns;
-  const counts = tally(data.orders, codes);
+/* ---------- main summary tables ---------- */
+function menuSummaryTable() {
+  const codes = DATA.displayColumns;
+  const counts = tally(DATA.orders, codes);
   let grand = 0;
   const rows = codes.map((c) => {
-    const menuItem = data.menu.find((m) => m.code === c) || { name: c, price: prices[c] || 0 };
-    const qty = counts[c] || 0;
-    const sub = qty * (prices[c] || 0);
-    grand += sub;
-    return `<tr${qty === 0 ? ' class="zero"' : ''}>
-      <td>${menuItem.name}</td>
-      <td class="num">${qty}</td>
-      <td class="num">${baht(prices[c] || 0)}</td>
-      <td class="num">${baht(sub)}</td></tr>`;
+    const item = DATA.menu.find((m) => m.code === c) || { name: c, price: PRICES[c] || 0 };
+    const qty = counts[c] || 0, sub = qty * (PRICES[c] || 0); grand += sub;
+    return `<tr${qty === 0 ? ' class="zero"' : ''}><td>${esc(item.name)}</td><td class="num">${qty}</td><td class="num">${baht(PRICES[c] || 0)}</td><td class="num">${baht(sub)}</td></tr>`;
   }).join('');
-  return { html: `
-    <table class="tbl summary-tbl">
-      <thead><tr><th>เมนู</th><th class="num">จำนวน</th><th class="num">ราคา/ที่</th><th class="num">รวม</th></tr></thead>
-      <tbody>${rows}</tbody>
-      <tfoot><tr><th>รวมทั้งสิ้น</th><th class="num">${Object.values(counts).reduce((a, b) => a + b, 0)}</th><th></th><th class="num">${baht(grand)}</th></tr></tfoot>
-    </table>`, grand, counts };
+  const totalItems = Object.values(counts).reduce((a, b) => a + b, 0);
+  return { html: `<table class="tbl summary-tbl"><thead><tr><th>เมนู</th><th class="num">จำนวน</th><th class="num">ราคา/ที่</th><th class="num">รวม</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><th>รวมทั้งสิ้น</th><th class="num">${totalItems}</th><th></th><th class="num">${baht(grand)}</th></tr></tfoot></table>`, grand, totalItems };
 }
 
-function customerTable(data, prices) {
-  const codes = data.displayColumns;
-  const head = codes.map((c) => `<th class="num" title="${(data.menu.find((m) => m.code === c) || {}).name || c}">${c}</th>`).join('');
-  let n = 0;
-  const body = data.orders.map((o) => {
-    n++;
+function customerTable() {
+  const codes = DATA.displayColumns;
+  const head = codes.map((c) => `<th class="num">${esc(c)}</th>`).join('');
+  const body = DATA.orders.map((o, i) => {
     const cells = codes.map((c) => `<td class="num">${o.items[c] ? o.items[c] : '<span class="dot">·</span>'}</td>`).join('');
-    const note = o.note ? `<div class="row-note">📝 ${o.note}</div>` : '';
-    return `<tr>
-      <td class="num idx">${n}</td>
-      <td class="user">@${o.user}${note}</td>
-      <td class="zip">${o.zip || '-'}</td>
-      ${cells}
-      <td class="num total">${baht(rowTotal(o.items, prices))}</td></tr>`;
+    const note = o.note ? `<div class="row-note">📝 ${esc(o.note)}</div>` : '';
+    return `<tr class="cust-row" data-kind="order" data-i="${i}"><td class="num idx">${i + 1}</td><td class="user">@${esc(o.user)}${note}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td><td class="slip">📋</td></tr>`;
   }).join('');
-  const totals = tally(data.orders, codes);
+  const totals = tally(DATA.orders, codes);
   const totalRow = codes.map((c) => `<th class="num">${totals[c] || 0}</th>`).join('');
-  const grand = data.orders.reduce((a, o) => a + rowTotal(o.items, prices), 0);
+  const grand = DATA.orders.reduce((a, o) => a + rowTotal(o.items), 0);
+  return `<div class="table-scroll"><table class="tbl cust-tbl"><thead><tr><th class="num">#</th><th>ผู้สั่ง</th><th>ปณ.</th>${head}<th class="num">ยอด</th><th></th></tr></thead><tbody>${body}</tbody><tfoot><tr><th></th><th>รวม</th><th></th>${totalRow}<th class="num">${baht(grand)}</th><th></th></tr></tfoot></table></div>`;
+}
+
+function captionSection() {
+  if (!DATA.captionOrders || !DATA.captionOrders.length) return '';
+  const rows = DATA.captionOrders.map((o, i) => {
+    const list = Object.entries(o.items).map(([k, v]) => `${esc(k)} ${v}`).join(', ');
+    return `<tr class="cust-row" data-kind="caption" data-i="${i}"><td class="user">@${esc(o.user)}</td><td class="zip">${esc(o.zip || '-')}</td><td>${list}</td><td class="num total">${baht(rowTotal(o.items))}</td><td class="slip">📋</td></tr>`;
+  }).join('');
+  const capTotal = DATA.captionOrders.reduce((a, o) => a + rowTotal(o.items), 0);
+  return `<section class="block"><h3>📌 ออเดอร์ในแคปชัน (ไม่ใช่คอมเมนต์)</h3><table class="tbl"><thead><tr><th>ผู้สั่ง</th><th>ปณ.</th><th>รายการ</th><th class="num">ยอด</th><th></th></tr></thead><tbody>${rows}</tbody><tfoot><tr><th colspan="3">รวมแคปชัน</th><th class="num">${baht(capTotal)}</th><th></th></tr></tfoot></table></section>`;
+}
+
+/* ---------- per-customer popup ---------- */
+function buildMessage(order, shipping) {
+  const lines = [];
+  lines.push('**' + (DATA.popupTitle || 'สรุปยอด'));
+  lines.push('');
+  lines.push('จัดส่ง' + (DATA.deliveryDateFull || DATA.deliveryDateLabel || ''));
+  lines.push('');
+  const codes = DATA.displayColumns.filter((c) => order.items[c]);
+  for (const c of codes) {
+    const qty = order.items[c];
+    lines.push(`${shortName(c)} ×${qty}   ${fmt(qty * (PRICES[c] || 0))} บาท`);
+  }
+  if (order.note) lines.push(`หมายเหตุ: ${order.note}`);
+  lines.push(`ค่าส่ง ${fmt(shipping)} บาท`);
+  lines.push('');
+  const grand = rowTotal(order.items) + Number(shipping || 0);
+  lines.push(`รวมเป็นเงิน ${fmt(grand)} บาท`);
+  lines.push('');
+  const p = DATA.payment || {};
+  lines.push('Payment :');
+  if (p.name) lines.push(p.name);
+  if (p.bank || p.account) lines.push(`${p.bank || ''} ${p.account || ''}`.trim());
+  lines.push('');
+  lines.push('หลังจากโอนเงินแล้ว');
+  lines.push('รบกวนส่งหลักฐานการโอนเงินให้หลีด้วยนะคะ');
+  lines.push('');
+  lines.push('ขอบคุณค่ะ 😊');
+  return { text: lines.join('\n'), grand };
+}
+
+function renderMsgCard(order, shipping) {
+  const codes = DATA.displayColumns.filter((c) => order.items[c]);
+  const itemRows = codes.map((c) => {
+    const qty = order.items[c];
+    return `<div class="m-row"><span>${esc(shortName(c))} <span class="m-qty">×${qty}</span></span><span class="m-amt">${fmt(qty * (PRICES[c] || 0))} บาท</span></div>`;
+  }).join('');
+  const noteRow = order.note ? `<div class="m-note">หมายเหตุ: ${esc(order.note)}</div>` : '';
+  const grand = rowTotal(order.items) + Number(shipping || 0);
+  const p = DATA.payment || {};
   return `
-    <div class="table-scroll">
-      <table class="tbl cust-tbl">
-        <thead><tr><th class="num">#</th><th>ผู้สั่ง</th><th>ปณ.</th>${head}<th class="num">ยอด</th></tr></thead>
-        <tbody>${body}</tbody>
-        <tfoot><tr><th></th><th>รวม</th><th></th>${totalRow}<th class="num">${baht(grand)}</th></tr></tfoot>
-      </table>
+    <div class="m-title">**${esc(DATA.popupTitle || 'สรุปยอด')}</div>
+    <div class="m-date">จัดส่ง${esc(DATA.deliveryDateFull || DATA.deliveryDateLabel || '')}</div>
+    <div class="m-items">${itemRows}
+      ${noteRow}
+      <div class="m-row m-ship"><span>ค่าส่ง</span><span class="m-amt">${fmt(shipping)} บาท</span></div>
+    </div>
+    <div class="m-total"><span>รวมเป็นเงิน</span><span>${fmt(grand)} บาท</span></div>
+    <div class="m-pay">
+      <div>Payment :</div>
+      <div>${esc(p.name || '')}</div>
+      <div class="m-acct">${esc((p.bank || '') + ' ' + (p.account || ''))}</div>
+    </div>
+    <div class="m-foot">
+      <div>หลังจากโอนเงินแล้ว</div>
+      <div>รบกวนส่งหลักฐานการโอนเงินให้หลีด้วยนะคะ</div>
+      <div class="m-thanks">ขอบคุณค่ะ 😊</div>
     </div>`;
 }
 
-function captionSection(data, prices) {
-  if (!data.captionOrders || !data.captionOrders.length) return '';
-  const rows = data.captionOrders.map((o) => {
-    const list = Object.entries(o.items).map(([k, v]) => `${k} ${v}`).join(', ');
-    return `<tr><td class="user">@${o.user}</td><td class="zip">${o.zip || '-'}</td><td>${list}</td><td class="num total">${baht(rowTotal(o.items, prices))}</td></tr>`;
-  }).join('');
-  const capTotal = data.captionOrders.reduce((a, o) => a + rowTotal(o.items, prices), 0);
-  return `
-    <section class="block">
-      <h3>📌 ออเดอร์ในแคปชัน (ไม่ใช่คอมเมนต์)</h3>
-      <table class="tbl">
-        <thead><tr><th>ผู้สั่ง</th><th>ปณ.</th><th>รายการ</th><th class="num">ยอด</th></tr></thead>
-        <tbody>${rows}</tbody>
-        <tfoot><tr><th colspan="3">รวมแคปชัน</th><th class="num">${baht(capTotal)}</th></tr></tfoot>
-      </table>
-    </section>`;
+function openPopup(order) {
+  let shipping = DATA.shippingDefault ?? 100;
+
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.innerHTML = `
+    <div class="modal-box" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <div><strong>@${esc(order.user)}</strong> <span class="muted">· ปณ. ${esc(order.zip || '-')}</span></div>
+        <button class="modal-x" title="ปิด">✕</button>
+      </div>
+
+      <div class="msg-card" id="shotCard">${renderMsgCard(order, shipping)}</div>
+
+      <div class="modal-controls">
+        <label class="ship-field">ค่าส่ง (บาท)
+          <input type="number" id="shipInput" value="${shipping}" min="0" step="10" />
+        </label>
+        <button class="btn-copy" id="copyBtn">📋 คัดลอกข้อความ</button>
+      </div>
+      <p class="copy-msg" id="copyMsg"></p>
+
+      <div class="verify-card">
+        <div class="verify-label">🔎 คอมเมนต์ต้นฉบับ (สำหรับยืนยัน — ไม่ต้องส่งลูกค้า)</div>
+        <div class="ig-comment">
+          <div class="ig-ava">${esc((order.user || '?')[0].toUpperCase())}</div>
+          <div class="ig-body"><div class="ig-user">${esc(order.user)}</div><div class="ig-text">${order.comment ? esc(order.comment) : '<span class="muted">— ไม่มีข้อความต้นฉบับ —</span>'}</div></div>
+        </div>
+        <div class="verify-parsed">ระบบอ่านได้: ${DATA.displayColumns.filter((c) => order.items[c]).map((c) => `${esc(shortName(c))} ×${order.items[c]}`).join(' · ')}</div>
+        ${DATA.source && DATA.source.url ? `<a class="verify-link" href="${esc(DATA.source.url)}" target="_blank" rel="noopener">เปิดโพสต์ต้นฉบับบน Instagram ↗</a>` : ''}
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  document.body.style.overflow = 'hidden';
+
+  const close = () => { modal.remove(); document.body.style.overflow = ''; };
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  modal.querySelector('.modal-x').addEventListener('click', close);
+  document.addEventListener('keydown', function onEsc(e) { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onEsc); } });
+
+  const shipInput = modal.querySelector('#shipInput');
+  shipInput.addEventListener('input', () => {
+    shipping = Number(shipInput.value) || 0;
+    modal.querySelector('#shotCard').innerHTML = renderMsgCard(order, shipping);
+  });
+
+  modal.querySelector('#copyBtn').addEventListener('click', async () => {
+    const { text } = buildMessage(order, shipping);
+    const msg = modal.querySelector('#copyMsg');
+    try { await navigator.clipboard.writeText(text); msg.textContent = 'คัดลอกข้อความแล้ว ✓'; msg.className = 'copy-msg ok'; }
+    catch { msg.textContent = 'คัดลอกไม่สำเร็จ — เลือกข้อความเองได้'; msg.className = 'copy-msg err'; }
+  });
 }
 
+/* ---------- bootstrap ---------- */
 async function loadOrder(id, pw) {
-  const file = `data/orders/${id}.enc.json`;
-  const res = await fetch(file, { cache: 'no-store' });
+  const res = await fetch(`data/orders/${id}.enc.json`, { cache: 'no-store' });
   if (!res.ok) throw new Error('ไม่พบไฟล์ออเดอร์: ' + id);
-  const blob = await res.text();
-  return JSON.parse(await decryptBlob(blob, pw));
+  return JSON.parse(await decryptBlob(await res.text(), pw));
 }
 
 async function main() {
@@ -104,58 +177,47 @@ async function main() {
   const pw = getPassword();
   const id = new URLSearchParams(location.search).get('id');
   const app = document.getElementById('app');
-
   if (!id) { app.innerHTML = '<p class="empty">ไม่ได้ระบุออเดอร์ · <a href="index.html">กลับหน้าแรก</a></p>'; return; }
 
-  let data;
-  try { data = await loadOrder(id, pw); }
-  catch (e) { app.innerHTML = `<p class="empty">${e.message} · <a href="index.html">กลับหน้าแรก</a></p>`; return; }
+  try { DATA = await loadOrder(id, pw); }
+  catch (e) { app.innerHTML = `<p class="empty">${esc(e.message)} · <a href="index.html">กลับหน้าแรก</a></p>`; return; }
+  PRICES = priceMap(DATA.menu);
 
-  const prices = priceMap(data.menu);
-  const summary = menuSummaryTable(data, prices);
-  const totalItems = Object.values(summary.counts).reduce((a, b) => a + b, 0);
-  const capTotal = (data.captionOrders || []).reduce((a, o) => a + rowTotal(o.items, prices), 0);
+  const summary = menuSummaryTable();
+  const capTotal = (DATA.captionOrders || []).reduce((a, o) => a + rowTotal(o.items), 0);
 
   app.innerHTML = `
     <header class="site-header">
       <div>
         <a class="back" href="index.html">‹ กลับ</a>
-        <h1>${data.vendor || data.title}</h1>
-        <p class="muted">🗓️ จัดส่ง ${data.deliveryDateLabel || data.deliveryDate || '-'}
-          ${data.source && data.source.url ? ` · <a href="${data.source.url}" target="_blank" rel="noopener">ที่มา (IG @${data.source.account})</a>` : ''}</p>
+        <h1>${esc(DATA.vendor || DATA.title)}</h1>
+        <p class="muted">🗓️ จัดส่ง ${esc(DATA.deliveryDateLabel || DATA.deliveryDate || '-')}${DATA.source && DATA.source.url ? ` · <a href="${esc(DATA.source.url)}" target="_blank" rel="noopener">ที่มา (IG @${esc(DATA.source.account)})</a>` : ''}</p>
       </div>
       <button class="lock-btn" id="lockBtn" title="ออกจากระบบ">🔓 ล็อก</button>
     </header>
     <main class="container">
       <div class="stats">
         <div class="stat"><div class="stat-num">${baht(summary.grand)}</div><div class="stat-label">ยอดรวม (คอมเมนต์)</div></div>
-        <div class="stat"><div class="stat-num">${totalItems}</div><div class="stat-label">จำนวนรายการ</div></div>
-        <div class="stat"><div class="stat-num">${data.countedComments ?? data.orders.length}</div><div class="stat-label">คอมเมนต์ที่นับ</div></div>
+        <div class="stat"><div class="stat-num">${summary.totalItems}</div><div class="stat-label">จำนวนรายการ</div></div>
+        <div class="stat"><div class="stat-num">${DATA.countedComments ?? DATA.orders.length}</div><div class="stat-label">คอมเมนต์ที่นับ</div></div>
         <div class="stat alt"><div class="stat-num">${baht(summary.grand + capTotal)}</div><div class="stat-label">รวม + แคปชัน</div></div>
       </div>
-
-      <section class="block">
-        <h3>✅ สรุปยอดแต่ละเมนู</h3>
-        ${summary.html}
-        <p class="muted small">* ยอดยังไม่รวมค่าจัดส่ง (กทม./ปริมณฑล Lalamove · ไกล Makesend 100฿ · ต่างจังหวัด Nim 250฿)</p>
-      </section>
-
-      <section class="block">
-        <h3>👥 รายละเอียดรายคน (${data.orders.length})</h3>
-        ${customerTable(data, prices)}
-      </section>
-
-      ${captionSection(data, prices)}
-
-      ${data.notes && data.notes.length ? `
-      <section class="block">
-        <h3>📝 หมายเหตุ</h3>
-        <ul class="notes">${data.notes.map((n) => `<li>${n}</li>`).join('')}</ul>
-      </section>` : ''}
+      <p class="hint">💡 แตะที่แถวลูกค้าเพื่อเปิด <strong>ใบสรุป (ป๊อปอัพ)</strong> สำหรับแคปหน้าจอส่งลูกค้า</p>
+      <section class="block"><h3>✅ สรุปยอดแต่ละเมนู</h3>${summary.html}<p class="muted small">* ยอดยังไม่รวมค่าจัดส่ง</p></section>
+      <section class="block"><h3>👥 รายละเอียดรายคน (${DATA.orders.length}) — แตะเพื่อดูใบสรุป</h3>${customerTable()}</section>
+      ${captionSection()}
+      ${DATA.notes && DATA.notes.length ? `<section class="block"><h3>📝 หมายเหตุ</h3><ul class="notes">${DATA.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></section>` : ''}
     </main>
     <footer class="site-footer">RoodeeLMS · ข้อมูลถูกเข้ารหัสไว้ในเครื่อง · เปิดดูเฉพาะผู้มีรหัสผ่าน</footer>`;
 
   document.getElementById('lockBtn').addEventListener('click', lock);
+  app.querySelectorAll('.cust-row').forEach((row) => {
+    row.addEventListener('click', () => {
+      const i = Number(row.dataset.i);
+      const order = row.dataset.kind === 'caption' ? DATA.captionOrders[i] : DATA.orders[i];
+      openPopup(order);
+    });
+  });
 }
 
 main();
