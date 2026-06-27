@@ -129,6 +129,11 @@ a:hover { text-decoration: underline; }
 
 .hint { background: rgba(255,179,71,.10); border: 1px solid rgba(255,179,71,.3); color: var(--accent-2);
   border-radius: 12px; padding: 10px 14px; font-size: .9rem; margin: 0 0 16px; }
+.sortbar { font-size: .85rem; color: var(--muted); margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+.sortbar select { background: var(--surface-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 10px; font-size: .85rem; cursor: pointer; }
+.sortbar select:focus { outline: none; border-color: var(--accent); }
+.cust-tbl td.time { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .cust-row { cursor: pointer; }
 .cust-row:hover td { background: rgba(255,122,69,.10); }
 .cust-tbl td.slip, .tbl td.slip { text-align: center; color: var(--muted); }

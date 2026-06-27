@@ -28,20 +28,51 @@ function menuSummaryTable() {
   return { html: `<table class="tbl summary-tbl"><thead><tr><th>เมนู</th><th class="num">จำนวน</th><th class="num">ราคา/ที่</th><th class="num">รวม</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><th>รวมทั้งสิ้น</th><th class="num">${totalItems}</th><th></th><th class="num">${baht(grand)}</th></tr></tfoot></table>`, grand, totalItems };
 }
 
+let SORT = 'zip';
+
+// Format an ISO timestamp as Bangkok-local "วันที่ เดือน เวลา" (or a dash placeholder).
+function fmtTime(iso) {
+  if (!iso) return '<span class="dot">–</span>';
+  const ms = Date.parse(iso);
+  if (isNaN(ms)) return '<span class="dot">–</span>';
+  return esc(new Date(ms).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }));
+}
+
+// Return [{o, i}] in the requested order. Orders without a time/zip sort last.
+function sortedOrders(mode) {
+  const arr = DATA.orders.map((o, i) => ({ o, i }));
+  const ms = (x) => { const v = Date.parse(x.o.time); return isNaN(v) ? null : v; };
+  if (mode === 'index') return arr; // original comment order
+  if (mode === 'time-new' || mode === 'time-old') {
+    const dir = mode === 'time-new' ? -1 : 1;
+    return arr.sort((a, b) => {
+      const ta = ms(a), tb = ms(b);
+      if (ta === null && tb === null) return 0;
+      if (ta === null) return 1;   // no-time rows always last
+      if (tb === null) return -1;
+      return (ta - tb) * dir;
+    });
+  }
+  return arr.sort((a, b) => String(a.o.zip || '99999').localeCompare(String(b.o.zip || '99999'))); // zip; no-zip last
+}
+
 function customerTable() {
   const codes = DATA.displayColumns;
   const head = codes.map((c) => `<th class="num">${esc(c)}</th>`).join('');
-  // sort by postal code (ascending); keep original index for the popup mapping
-  const ordered = DATA.orders.map((o, i) => ({ o, i })).sort((a, b) => String(a.o.zip || '').localeCompare(String(b.o.zip || '')));
+  const hasTime = DATA.orders.some((o) => o.time);
+  const ordered = sortedOrders(SORT);
   const body = ordered.map(({ o, i }, n) => {
     const cells = codes.map((c) => `<td class="num">${o.items[c] ? o.items[c] : '<span class="dot">·</span>'}</td>`).join('');
     const note = o.note ? `<div class="row-note">📝 ${esc(o.note)}</div>` : '';
-    return `<tr class="cust-row" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td><td class="slip">📋</td></tr>`;
+    const timeCell = hasTime ? `<td class="time">${fmtTime(o.time)}</td>` : '';
+    return `<tr class="cust-row" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td>${timeCell}<td class="slip">📋</td></tr>`;
   }).join('');
   const totals = tally(DATA.orders, codes);
   const totalRow = codes.map((c) => `<th class="num">${totals[c] || 0}</th>`).join('');
   const grand = DATA.orders.reduce((a, o) => a + rowTotal(o.items), 0);
-  return `<div class="table-scroll"><table class="tbl cust-tbl"><thead><tr><th class="num">#</th><th>ผู้สั่ง</th><th>ปณ.</th>${head}<th class="num">ยอด</th><th></th></tr></thead><tbody>${body}</tbody><tfoot><tr><th></th><th>รวม</th><th></th>${totalRow}<th class="num">${baht(grand)}</th><th></th></tr></tfoot></table></div>`;
+  const timeHead = hasTime ? '<th>เวลาสั่ง</th>' : '';
+  const timeFoot = hasTime ? '<th></th>' : '';
+  return `<div class="table-scroll"><table class="tbl cust-tbl"><thead><tr><th class="num">#</th><th>ผู้สั่ง</th><th>ปณ.</th>${head}<th class="num">ยอด</th>${timeHead}<th></th></tr></thead><tbody>${body}</tbody><tfoot><tr><th></th><th>รวม</th><th></th>${totalRow}<th class="num">${baht(grand)}</th>${timeFoot}<th></th></tr></tfoot></table></div>`;
 }
 
 function captionSection() {
@@ -205,7 +236,7 @@ async function main() {
       <div>
         <a class="back" href="index.html">‹ กลับ</a>
         <h1>${esc(DATA.vendor || DATA.title)}</h1>
-        <p class="muted">🗓️ จัดส่ง ${esc(DATA.deliveryDateLabel || DATA.deliveryDate || '-')}${DATA.source && DATA.source.url ? ` · <a href="${esc(DATA.source.url)}" target="_blank" rel="noopener">ที่มา (IG @${esc(DATA.source.account)})</a>` : ''}</p>
+        <p class="muted">🗓️ จัดส่ง ${esc(DATA.deliveryDateLabel || DATA.deliveryDate || '-')}${DATA.source && DATA.source.url ? ` · <a href="${esc(DATA.source.url)}" target="_blank" rel="noopener">ที่มา (IG @${esc(DATA.source.account)})</a>` : ''}${DATA.parsedAt ? ` · 🔄 อัปเดต ${fmtTime(DATA.parsedAt)}` : ''}</p>
       </div>
       <button class="lock-btn" id="lockBtn" title="ออกจากระบบ">🔓 ล็อก</button>
     </header>
@@ -218,19 +249,44 @@ async function main() {
       </div>
       <p class="hint">💡 แตะที่แถวลูกค้าเพื่อเปิด <strong>ใบสรุป (ป๊อปอัพ)</strong> สำหรับแคปหน้าจอส่งลูกค้า</p>
       <section class="block"><h3>✅ สรุปยอดแต่ละเมนู</h3>${summary.html}<p class="muted small">* ยอดยังไม่รวมค่าจัดส่ง</p></section>
-      <section class="block"><h3>👥 รายละเอียดรายคน (${DATA.orders.length}) · เรียงตามรหัสไปรษณีย์ — แตะเพื่อดูใบสรุป</h3>${customerTable()}</section>
+      <section class="block">
+        <h3>👥 รายละเอียดรายคน (${DATA.orders.length}) — แตะเพื่อดูใบสรุป</h3>
+        <div class="sortbar">เรียงตาม:
+          <select id="sortSel">
+            <option value="zip">รหัสไปรษณีย์</option>
+            <option value="time-new">เวลาสั่ง · ใหม่→เก่า</option>
+            <option value="time-old">เวลาสั่ง · เก่า→ใหม่</option>
+            <option value="index">ลำดับคอมเมนต์</option>
+          </select>
+        </div>
+        <div id="custWrap">${customerTable()}</div>
+      </section>
       ${captionSection()}
       ${DATA.notes && DATA.notes.length ? `<section class="block"><h3>📝 หมายเหตุ</h3><ul class="notes">${DATA.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></section>` : ''}
     </main>
     <footer class="site-footer">RoodeeLMS · ข้อมูลถูกเข้ารหัสไว้ในเครื่อง · เปิดดูเฉพาะผู้มีรหัสผ่าน</footer>`;
 
   document.getElementById('lockBtn').addEventListener('click', lock);
-  app.querySelectorAll('.cust-row').forEach((row) => {
-    row.addEventListener('click', () => {
+  bindRows();
+  const sortSel = document.getElementById('sortSel');
+  if (sortSel) {
+    sortSel.value = SORT;
+    sortSel.addEventListener('change', () => {
+      SORT = sortSel.value;
+      document.getElementById('custWrap').innerHTML = customerTable();
+      bindRows();
+    });
+  }
+}
+
+// (Re)attach popup-open handlers to every customer/caption row.
+function bindRows() {
+  document.querySelectorAll('.cust-row').forEach((row) => {
+    row.onclick = () => {
       const i = Number(row.dataset.i);
       const order = row.dataset.kind === 'caption' ? DATA.captionOrders[i] : DATA.orders[i];
       openPopup(order);
-    });
+    };
   });
 }
 
