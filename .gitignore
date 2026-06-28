@@ -1,4 +1,7 @@
 # Never commit plaintext order data to this PUBLIC repo.
+# _local/ = editable round sources + UNENCRYPTED data (IG handles + postal codes) + notes.
+# Kept inside the project folder for organisation, but NOT pushed (Pages repo is public).
+_local/
 data-src/
 *.plain.json
 *.local.json
