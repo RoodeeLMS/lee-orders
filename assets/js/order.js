@@ -64,8 +64,9 @@ function customerTable() {
   const body = ordered.map(({ o, i }, n) => {
     const cells = codes.map((c) => `<td class="num">${o.items[c] ? o.items[c] : '<span class="dot">·</span>'}</td>`).join('');
     const note = o.note ? `<div class="row-note">📝 ${esc(o.note)}</div>` : '';
+    const remark = o.remark ? `<div class="row-remark">❓ ${esc(o.remark)} · รอคุณหลียืนยัน</div>` : '';
     const timeCell = hasTime ? `<td class="time">${fmtTime(o.time)}</td>` : '';
-    return `<tr class="cust-row" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td>${timeCell}<td class="slip">📋</td></tr>`;
+    return `<tr class="cust-row${o.remark ? ' has-remark' : ''}" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}${remark}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td>${timeCell}<td class="slip">📋</td></tr>`;
   }).join('');
   const totals = tally(DATA.orders, codes);
   const totalRow = codes.map((c) => `<th class="num">${totals[c] || 0}</th>`).join('');
@@ -185,6 +186,7 @@ function openPopup(order) {
           <div class="ig-body"><div class="ig-user">${esc(order.user)}</div><div class="ig-text">${order.comment ? esc(order.comment) : '<span class="muted">— ไม่มีข้อความต้นฉบับ —</span>'}</div></div>
         </div>
         <div class="verify-parsed">ระบบอ่านได้: ${DATA.displayColumns.filter((c) => order.items[c]).map((c) => `${esc(shortName(c))} ×${order.items[c]}`).join(' · ')}</div>
+        ${order.remark ? `<div class="verify-remark">❓ ข้อความที่ระบบไม่เข้าใจ: <b>${esc(order.remark)}</b><br>รอคุณหลีมาตอบ/ยืนยันว่าหมายถึงอะไร (ยังไม่ถูกนับเป็นเมนู)</div>` : ''}
         ${DATA.source && DATA.source.url ? `<a class="verify-link" href="${esc(DATA.source.url)}" target="_blank" rel="noopener">เปิดโพสต์ต้นฉบับบน Instagram ↗</a>` : ''}
       </div>
     </div>`;
@@ -248,6 +250,7 @@ async function main() {
         <div class="stat alt"><div class="stat-num">${baht(summary.grand + capTotal)}</div><div class="stat-label">รวม + แคปชัน</div></div>
       </div>
       <p class="hint">💡 แตะที่แถวลูกค้าเพื่อเปิด <strong>ใบสรุป (ป๊อปอัพ)</strong> สำหรับแคปหน้าจอส่งลูกค้า</p>
+      ${(() => { const r = DATA.orders.filter((o) => o.remark); return r.length ? `<p class="remark-banner">❓ มี <strong>${r.length}</strong> ออเดอร์ที่มีข้อความระบบไม่เข้าใจ รอคุณหลีมาตอบ: ${r.map((o) => '@' + esc(o.user)).join(', ')}</p>` : ''; })()}
       <section class="block"><h3>✅ สรุปยอดแต่ละเมนู</h3>${summary.html}<p class="muted small">* ยอดยังไม่รวมค่าจัดส่ง</p></section>
       <section class="block">
         <h3>👥 รายละเอียดรายคน (${DATA.orders.length}) — แตะเพื่อดูใบสรุป</h3>

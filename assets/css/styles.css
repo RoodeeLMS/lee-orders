@@ -124,6 +124,12 @@ a:hover { text-decoration: underline; }
 .cust-tbl td.total { font-weight: 600; color: var(--accent-2); }
 .cust-tbl .dot { color: #3a4150; }
 .row-note { font-size: .78rem; color: var(--accent-2); margin-top: 2px; white-space: normal; }
+.row-remark { font-size: .78rem; color: var(--red); margin-top: 2px; white-space: normal; }
+.cust-row.has-remark td { background: rgba(255,107,107,.07); }
+.remark-banner { background: rgba(255,107,107,.12); border: 1px solid rgba(255,107,107,.4); color: var(--red);
+  border-radius: 12px; padding: 10px 14px; font-size: .88rem; margin: 0 0 16px; }
+.verify-remark { margin-top: 10px; font-size: .82rem; color: var(--red); background: rgba(255,107,107,.1);
+  border: 1px solid rgba(255,107,107,.3); border-radius: 8px; padding: 8px 10px; }
 .notes { margin: 0; padding-left: 18px; color: var(--muted); }
 .notes li { margin: 4px 0; }
 
