@@ -62,12 +62,17 @@ function monthlyRollup() {
     (r.orders || []).forEach((o) => M.cust.add(o.user));
   });
   const keys = Object.keys(byKey).sort();
-  // returning customers = this month's customers who also ordered the previous (chronological) month
+  // returning (vs previous month) + new/back (vs ALL earlier months, cumulative) + AOV
+  const seen = new Set();
   return keys.map((k, i) => {
     const M = byKey[k];
     let returning = 0;
     if (i > 0) { const prev = byKey[keys[i - 1]].cust; M.cust.forEach((u) => { if (prev.has(u)) returning++; }); }
-    return { ...M, custCount: M.cust.size, returning, hasPrev: i > 0 };
+    let newCount = 0; M.cust.forEach((u) => { if (!seen.has(u)) newCount++; });
+    const backCount = M.cust.size - newCount;       // ordered in some earlier month too
+    M.cust.forEach((u) => seen.add(u));
+    const aov = M.orders ? Math.round(M.rev / M.orders) : 0;
+    return { ...M, custCount: M.cust.size, returning, newCount, backCount, aov, hasPrev: i > 0 };
   });
 }
 
@@ -129,15 +134,67 @@ function renderMonthSummary(monthly) {
     return `<tr${active}><td><a href="#" class="mlink" data-mk="${esc(m.key)}">${esc(m.label)}</a></td>
       <td class="num">${m.rounds}</td><td class="num">${m.orders}</td><td class="num">${fmt(m.items)}</td>
       <td class="num">${m.custCount}</td><td class="num">${m.hasPrev ? m.returning : '<span class="dot">·</span>'}</td>
-      <td class="num">${baht(m.rev)}</td></tr>`;
+      <td class="num">${baht(m.aov)}</td><td class="num">${baht(m.rev)}</td></tr>`;
   }).join('');
   const tR = monthly.reduce((a, m) => a + m.rounds, 0), tO = monthly.reduce((a, m) => a + m.orders, 0);
   const tI = monthly.reduce((a, m) => a + m.items, 0), tV = monthly.reduce((a, m) => a + m.rev, 0);
   return `<section class="block"><h3>🗓️ สรุปรายเดือน</h3>
-    <div class="table-scroll"><table class="tbl"><thead><tr><th>เดือน</th><th class="num">รอบ</th><th class="num">ออเดอร์</th><th class="num">รายการ</th><th class="num">ลูกค้า</th><th class="num" title="ลูกค้าที่กลับมาสั่งซ้ำจากเดือนก่อนหน้า">ซ้ำเดือนก่อน</th><th class="num">รายได้</th></tr></thead>
+    <div class="table-scroll"><table class="tbl"><thead><tr><th>เดือน</th><th class="num">รอบ</th><th class="num">ออเดอร์</th><th class="num">รายการ</th><th class="num">ลูกค้า</th><th class="num" title="ลูกค้าที่กลับมาสั่งซ้ำจากเดือนก่อนหน้า">ซ้ำเดือนก่อน</th><th class="num" title="รายได้เฉลี่ยต่อ 1 ออเดอร์">เฉลี่ย/ออเดอร์</th><th class="num">รายได้</th></tr></thead>
     <tbody>${rows}</tbody>
-    <tfoot><tr><th>รวม</th><th class="num">${tR}</th><th class="num">${tO}</th><th class="num">${fmt(tI)}</th><th></th><th></th><th class="num">${baht(tV)}</th></tr></tfoot></table></div>
-    <p class="muted small">* คลิกชื่อเดือนเพื่อกรองดูเฉพาะเดือนนั้น · "ซ้ำเดือนก่อน" = ลูกค้าที่สั่งทั้งเดือนนี้และเดือนก่อนหน้า</p></section>`;
+    <tfoot><tr><th>รวม</th><th class="num">${tR}</th><th class="num">${tO}</th><th class="num">${fmt(tI)}</th><th></th><th></th><th class="num">${baht(tO ? Math.round(tV / tO) : 0)}</th><th class="num">${baht(tV)}</th></tr></tfoot></table></div>
+    <p class="muted small">* คลิกชื่อเดือนเพื่อกรองดูเฉพาะเดือนนั้น · "ซ้ำเดือนก่อน" = ลูกค้าที่สั่งทั้งเดือนนี้และเดือนก่อนหน้า · "เฉลี่ย/ออเดอร์" = รายได้ ÷ จำนวนออเดอร์</p></section>`;
+}
+
+function renderNewReturning(monthly) {
+  if (monthly.length < 2) return '';  // only meaningful with 2+ months
+  const max = Math.max(1, ...monthly.map((m) => m.custCount));
+  const rows = monthly.map((m, i) => {
+    const nwPct = Math.round((m.newCount / max) * 100), bkPct = Math.round((m.backCount / max) * 100);
+    const ret = (i > 0 && monthly[i - 1].custCount) ? Math.round((m.returning / monthly[i - 1].custCount) * 100) + '%' : '<span class="dot">·</span>';
+    return `<tr><td>${esc(m.label)}</td>
+      <td class="num">${m.newCount}</td><td class="num">${m.backCount}</td><td class="num">${m.custCount}</td><td class="num">${ret}</td>
+      <td class="barcell"><span class="bar2 nw" style="width:${nwPct}%"></span><span class="bar2 bk" style="width:${bkPct}%"></span></td></tr>`;
+  }).join('');
+  return `<section class="block"><h3>🌱 ลูกค้าใหม่ vs กลับมา (รายเดือน)</h3>
+    <div class="table-scroll"><table class="tbl"><thead><tr><th>เดือน</th><th class="num">ลูกค้าใหม่</th><th class="num">กลับมา</th><th class="num">รวม</th><th class="num" title="สัดส่วนลูกค้าเดือนก่อนที่กลับมาสั่งเดือนนี้">คงอยู่</th><th><span class="lg nw"></span>ใหม่ <span class="lg bk"></span>กลับมา</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="muted small">* "ลูกค้าใหม่" = ไม่เคยสั่งในเดือนก่อนๆ เลย · "กลับมา" = เคยสั่งเดือนก่อนหน้า · "คงอยู่" = ลูกค้าเดือนก่อนที่กลับมาสั่งเดือนนี้ ÷ ลูกค้าเดือนก่อนทั้งหมด</p></section>`;
+}
+
+function renderTopDishes(rounds) {
+  const agg = {};  // short name -> { qty, rev }  (same-named dishes summed across rounds)
+  rounds.forEach((r) => {
+    const p = priceMap(r.menu);
+    [...(r.orders || []), ...(r.captionOrders || [])].forEach((o) => {
+      for (const k in o.items) {
+        const mi = r.menu.find((m) => m.code === k) || {};
+        const nm = mi.short || mi.name || k;
+        agg[nm] = agg[nm] || { qty: 0, rev: 0 };
+        agg[nm].qty += o.items[k]; agg[nm].rev += o.items[k] * (p[k] || 0);
+      }
+    });
+  });
+  const byRev = Object.entries(agg).sort((a, b) => b[1].rev - a[1].rev).slice(0, 12);
+  if (!byRev.length) return '';
+  const max = byRev[0][1].rev;
+  const rows = byRev.map(([nm, d], i) => `<tr><td class="num muted">${i + 1}</td><td>${esc(nm)}</td><td class="num">${fmt(d.qty)}</td><td class="num">${baht(d.rev)}</td><td class="barcell"><span class="bar" style="width:${Math.round((d.rev / max) * 100)}%"></span></td></tr>`).join('');
+  return `<section class="block"><h3>🥇 เมนูขายดีสะสม (Top 12 ตามรายได้)</h3>
+    <div class="table-scroll"><table class="tbl"><thead><tr><th class="num">#</th><th>เมนู</th><th class="num">จำนวน</th><th class="num">รายได้</th><th>·</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="muted small">* รวมเมนูชื่อเดียวกันข้ามรอบ</p></section>`;
+}
+
+function renderOrderTimes(rounds) {
+  const buckets = new Array(24).fill(0); let total = 0;
+  rounds.forEach((r) => (r.orders || []).forEach((o) => {
+    if (!o.time) return; const d = new Date(o.time); if (isNaN(d)) return;
+    buckets[(d.getUTCHours() + 7) % 24]++; total++;   // Thai local = UTC+7
+  }));
+  if (!total) return '';
+  const max = Math.max(...buckets);
+  const bars = buckets.map((c, h) => `<div class="hbar" title="${h}:00–${h + 1}:00 — ${c} ออเดอร์"><span class="hbar-fill" style="height:${max ? Math.round((c / max) * 100) : 0}%"></span><span class="hbar-lbl">${h}</span></div>`).join('');
+  const peak = buckets.indexOf(max);
+  return `<section class="block"><h3>⏰ ช่วงเวลาที่ลูกค้าสั่ง (เวลาไทย)</h3>
+    <div class="hbars">${bars}</div>
+    <p class="muted small">* อิงเวลาคอมเมนต์ ${fmt(total)} ออเดอร์ · ชั่วโมงที่สั่งมากสุด ≈ <b>${peak}:00–${peak + 1}:00 น.</b></p></section>`;
 }
 
 function renderFilterBar(monthly) {
@@ -207,6 +264,8 @@ function renderDyn() {
     ${renderTrend(rs)}
     ${renderCategories(cats, rs)}
     ${renderTopItems(topItems)}
+    ${renderTopDishes(rounds)}
+    ${renderOrderTimes(rounds)}
     ${renderCustomers(cust, scopeLabel)}`;
 
   const search = document.getElementById('custSearch');
@@ -248,6 +307,7 @@ async function main() {
       <button class="lock-btn" id="lockBtn" title="ออกจากระบบ">🔓 ล็อก</button></header>
     <main class="container">
       <div id="monthSummary">${renderMonthSummary(monthly)}</div>
+      ${renderNewReturning(monthly)}
       ${renderFilterBar(monthly)}
       <div id="dyn"></div>
     </main>

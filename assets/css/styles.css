@@ -245,3 +245,17 @@ a:hover { text-decoration: underline; }
   border-radius: 10px; padding: 10px 14px; margin: 0 0 16px; font-size: 0.92rem; color: #ffd9cc;
 }
 .scope-note a { color: #ffb199; }
+
+/* ── New-vs-returning stacked bars + legend ── */
+.bar2 { display: inline-block; height: 11px; border-radius: 3px; vertical-align: middle; }
+.bar2.nw { background: linear-gradient(90deg, #ff7a59, #ff9a40); }
+.bar2.bk { background: linear-gradient(90deg, #4aa3ff, #6ad0ff); }
+.lg { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: middle; margin: 0 4px 0 10px; }
+.lg.nw { background: #ff7a59; }
+.lg.bk { background: #4aa3ff; }
+
+/* ── Order-time histogram ── */
+.hbars { display: flex; align-items: flex-end; gap: 3px; height: 110px; margin: 8px 0 4px; padding-top: 6px; }
+.hbar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+.hbar-fill { width: 70%; min-height: 2px; background: linear-gradient(180deg, #ff7a59, #ff5a8a); border-radius: 3px 3px 0 0; transition: height .2s; }
+.hbar-lbl { font-size: 0.6rem; color: #8a8a96; margin-top: 3px; }
