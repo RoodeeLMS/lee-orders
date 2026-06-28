@@ -34,6 +34,7 @@ async function main() {
       <button class="lock-btn" id="lockBtn" title="ออกจากระบบ">🔓 ล็อก</button>
     </header>
     <main class="container">
+      <a class="insights-link" href="insights.html">📊 ดูสถิติ & เทรนด์ · ประวัติลูกค้า ›</a>
       ${orders.length
         ? `<div class="order-grid">${orders.map(card).join('')}</div>`
         : `<p class="empty">ยังไม่มีรอบออเดอร์</p>`}
