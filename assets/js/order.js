@@ -156,6 +156,71 @@ function renderMsgCard(order, shipping) {
     </div>`;
 }
 
+/* ---------- delivery card (order + looked-up address, for the courier) ---------- */
+// Address book is decrypted once into ADDRBOOK = { byUser: { handle: { postal: {name,phone,address,maps} } } }.
+let ADDRBOOK = null;
+const normU = (u) => String(u || '').replace(/\s*\(.*?\)\s*$/, '').trim().toLowerCase();
+
+async function loadAddressBook(pw) {
+  try {
+    const res = await fetch('data/address-book.enc.json', { cache: 'no-store' });
+    if (!res.ok) return; // feature degrades gracefully if the file isn't there
+    ADDRBOOK = JSON.parse(await decryptBlob(await res.text(), pw));
+  } catch (e) { ADDRBOOK = null; }
+}
+
+// Look up an address by @handle (+ postal to disambiguate multi-address customers).
+function lookupAddress(user, zip) {
+  if (!ADDRBOOK || !ADDRBOOK.byUser) return null;
+  const slots = ADDRBOOK.byUser[normU(user)];
+  if (!slots) return null;
+  const keys = Object.keys(slots);
+  if (zip && slots[zip]) return { ...slots[zip], postal: zip };           // exact ปณ. match
+  if (keys.length === 1) return { ...slots[keys[0]], postal: keys[0] };    // only one address
+  if (zip) { const z = keys.find((k) => k.slice(0, 2) === zip.slice(0, 2)); if (z) return { ...slots[z], postal: z, ambiguous: true }; }
+  return { ...slots[keys[0]], postal: keys[0], ambiguous: true };          // multi-address, can't be sure
+}
+
+// Notebook-style block (handle + items + total, then name/phone/address/maps) for the courier.
+function buildDeliveryText(order, shipping) {
+  const a = lookupAddress(order.user, order.zip);
+  const items = DATA.displayColumns.filter((c) => order.items[c]).map((c) => `${shortName(c)} ×${order.items[c]}`).join(' · ');
+  const itemTotal = rowTotal(order.items);
+  const grand = itemTotal + Number(shipping || 0);
+  const L = [];
+  L.push(`@${order.user}  ${items}`);
+  L.push(`ยอดสินค้า ${fmt(itemTotal)} + ค่าส่ง ${fmt(shipping)} = รวม ${fmt(grand)} บาท`);
+  L.push('');
+  if (a) {
+    if (a.name) L.push(a.name);
+    if (a.phone) L.push(a.phone);
+    if (a.address) L.push(a.address + (a.postal && !a.address.includes(a.postal) ? ' ' + a.postal : ''));
+    if (a.maps) L.push(a.maps);
+    if (a.ambiguous) L.push('⚠️ ลูกค้ามีหลายที่อยู่ — ตรวจ ปณ. ให้ตรงก่อนส่ง');
+  } else {
+    L.push(`(ไม่พบที่อยู่ในสมุด · ปณ. ${order.zip || '-'} — ต้องตามเก็บที่อยู่จากลูกค้า)`);
+  }
+  return { text: L.join('\n'), found: !!a };
+}
+
+function renderDeliveryCard(order, shipping) {
+  if (!ADDRBOOK) return `<div class="del-empty">⚠️ สมุดที่อยู่ยังไม่ได้โหลด/โหลดไม่สำเร็จ — สร้างข้อความคนส่งไม่ได้</div>`;
+  const a = lookupAddress(order.user, order.zip);
+  const items = DATA.displayColumns.filter((c) => order.items[c]).map((c) => `${esc(shortName(c))} <span class="m-qty">×${order.items[c]}</span>`).join(' · ');
+  const itemTotal = rowTotal(order.items);
+  const grand = itemTotal + Number(shipping || 0);
+  const addrHtml = a
+    ? `${a.name ? `<div class="del-name">${esc(a.name)}${a.phone ? ` · <a href="tel:${esc(a.phone)}">${esc(a.phone)}</a>` : ''}</div>` : ''}
+       ${a.address ? `<div class="del-addr">${esc(a.address)}${a.postal && !a.address.includes(a.postal) ? ' ' + esc(a.postal) : ''}</div>` : ''}
+       ${a.maps ? `<div class="del-maps"><a href="${esc(a.maps)}" target="_blank" rel="noopener">📍 เปิดพิกัด Maps ↗</a></div>` : ''}
+       ${a.ambiguous ? `<div class="del-warn">⚠️ ลูกค้ามีหลายที่อยู่ — ตรวจ ปณ. ให้ตรงก่อนส่ง</div>` : ''}`
+    : `<div class="del-warn">ไม่พบที่อยู่ในสมุด (ปณ. ${esc(order.zip || '-')}) — ต้องตามเก็บที่อยู่จากลูกค้า</div>`;
+  return `
+    <div class="del-line1">@${esc(order.user)} &nbsp; ${items}</div>
+    <div class="del-amt">ยอดสินค้า ${fmt(itemTotal)} + ค่าส่ง ${fmt(shipping)} = <b>รวม ${fmt(grand)} บาท</b></div>
+    <div class="del-addrwrap">${addrHtml}</div>`;
+}
+
 function openPopup(order) {
   const zone = shippingZone(order);
   let shipping = zone.fee;
@@ -178,6 +243,13 @@ function openPopup(order) {
         <button class="btn-copy" id="copyBtn">📋 คัดลอกข้อความ</button>
       </div>
       <p class="copy-msg" id="copyMsg"></p>
+
+      <div class="del-card" id="delCardWrap">
+        <div class="del-head">📦 สำหรับคนส่งของ <span class="del-sub">(order + ที่อยู่จากสมุด)</span></div>
+        <div class="del-body" id="delCard">${renderDeliveryCard(order, shipping)}</div>
+        <button class="btn-copy btn-copy-del" id="copyDelBtn">📋 คัดลอกสำหรับคนส่งของ</button>
+        <p class="copy-msg" id="copyDelMsg"></p>
+      </div>
 
       <div class="verify-card">
         <div class="verify-label">🔎 คอมเมนต์ต้นฉบับ (สำหรับยืนยัน — ไม่ต้องส่งลูกค้า)</div>
@@ -202,6 +274,8 @@ function openPopup(order) {
   shipInput.addEventListener('input', () => {
     shipping = Number(shipInput.value) || 0;
     modal.querySelector('#shotCard').innerHTML = renderMsgCard(order, shipping);
+    const del = modal.querySelector('#delCard');
+    if (del) del.innerHTML = renderDeliveryCard(order, shipping);
   });
 
   modal.querySelector('#copyBtn').addEventListener('click', async () => {
@@ -209,6 +283,17 @@ function openPopup(order) {
     const msg = modal.querySelector('#copyMsg');
     try { await navigator.clipboard.writeText(text); msg.textContent = 'คัดลอกข้อความแล้ว ✓'; msg.className = 'copy-msg ok'; }
     catch { msg.textContent = 'คัดลอกไม่สำเร็จ — เลือกข้อความเองได้'; msg.className = 'copy-msg err'; }
+  });
+
+  const copyDel = modal.querySelector('#copyDelBtn');
+  if (copyDel) copyDel.addEventListener('click', async () => {
+    const { text, found } = buildDeliveryText(order, shipping);
+    const msg = modal.querySelector('#copyDelMsg');
+    try {
+      await navigator.clipboard.writeText(text);
+      msg.textContent = found ? 'คัดลอกข้อความคนส่งแล้ว ✓' : 'คัดลอกแล้ว ✓ (ยังไม่มีที่อยู่ในสมุด)';
+      msg.className = 'copy-msg ' + (found ? 'ok' : 'err');
+    } catch { msg.textContent = 'คัดลอกไม่สำเร็จ — เลือกข้อความเองได้'; msg.className = 'copy-msg err'; }
   });
 }
 
@@ -229,6 +314,7 @@ async function main() {
   try { DATA = await loadOrder(id, pw); }
   catch (e) { app.innerHTML = `<p class="empty">${esc(e.message)} · <a href="index.html">กลับหน้าแรก</a></p>`; return; }
   PRICES = priceMap(DATA.menu);
+  await loadAddressBook(pw); // non-fatal: powers the 📦 courier card in each popup
 
   const summary = menuSummaryTable();
   const capTotal = (DATA.captionOrders || []).reduce((a, o) => a + rowTotal(o.items), 0);

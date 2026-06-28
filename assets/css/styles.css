@@ -185,6 +185,21 @@ a:hover { text-decoration: underline; }
 .copy-msg.ok { color: var(--green); }
 .copy-msg.err { color: var(--red); }
 
+/* 📦 courier card — separate from the customer slip; for sending to the delivery person */
+.del-card { margin-top: 16px; background: #0e2a33; border: 1px solid #1f5566; border-radius: 12px; padding: 12px 14px; }
+.del-head { font-size: .82rem; font-weight: 700; color: #7fd4e6; margin-bottom: 10px; }
+.del-sub { font-weight: 400; color: var(--muted); }
+.del-body { background: #ffffff; color: #1c1c1e; border-radius: 10px; padding: 14px 14px; line-height: 1.7; font-size: .96rem; }
+.del-line1 { font-weight: 700; margin-bottom: 4px; word-break: break-word; }
+.del-amt { color: #374151; font-size: .9rem; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #e5e7eb; }
+.del-name { font-weight: 600; }
+.del-name a { color: #0b6bcb; text-decoration: none; }
+.del-addr { color: #1c1c1e; margin: 2px 0; }
+.del-maps a { color: #0b6bcb; font-size: .9rem; }
+.del-warn { color: #b45309; font-size: .85rem; margin-top: 6px; }
+.del-empty { color: var(--muted); font-size: .9rem; }
+.btn-copy-del { width: 100%; margin-top: 12px; background: linear-gradient(135deg, #2bb6d6, #1f8fb0); color: #04222b; }
+
 .verify-card { margin-top: 16px; background: var(--surface-2); border: 1px solid var(--line);
   border-radius: 12px; padding: 12px 14px; }
 .verify-label { font-size: .78rem; color: var(--muted); margin-bottom: 8px; }
