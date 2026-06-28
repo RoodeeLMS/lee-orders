@@ -226,3 +226,22 @@ a:hover { text-decoration: underline; }
   .stat-num { font-size: 1.25rem; }
   .site-header h1 { font-size: 1.2rem; }
 }
+
+/* ── Monthly filter + summary (insights) ── */
+.mfilter { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 18px; }
+.mchip {
+  background: #1c1c22; color: #d8d8e0; border: 1px solid #33333d;
+  border-radius: 999px; padding: 7px 16px; font-size: 0.9rem; font-family: inherit;
+  cursor: pointer; transition: all .15s;
+}
+.mchip:hover { border-color: #ff7a59; color: #fff; }
+.mchip.on { background: linear-gradient(135deg, #ff7a59, #ff5a8a); color: #fff; border-color: transparent; font-weight: 600; }
+.row-sel { background: rgba(255,122,89,.12); }
+.row-sel td:first-child { font-weight: 700; }
+.mlink { color: #ffb199; text-decoration: none; }
+.mlink:hover { text-decoration: underline; color: #fff; }
+.scope-note {
+  background: rgba(255,122,89,.1); border: 1px solid rgba(255,122,89,.3);
+  border-radius: 10px; padding: 10px 14px; margin: 0 0 16px; font-size: 0.92rem; color: #ffd9cc;
+}
+.scope-note a { color: #ffb199; }
