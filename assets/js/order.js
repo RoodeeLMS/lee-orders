@@ -12,7 +12,8 @@ let PRICES = {};
 function priceMap(menu) { const m = {}; for (const it of menu) m[it.code] = it.price; return m; }
 function shortName(code) { const m = DATA.menu.find((x) => x.code === code); return m ? (m.short || m.name) : code; }
 function rowTotal(items) { let t = 0; for (const k in items) t += (items[k] || 0) * (PRICES[k] || 0); return t; }
-function tally(orders, codes) { const c = {}; codes.forEach((k) => (c[k] = 0)); for (const o of orders) for (const k in o.items) c[k] = (c[k] || 0) + o.items[k]; return c; }
+// active tally EXCLUDES orders flagged cancelled (comment vanished) — they aren't counted in totals.
+function tally(orders, codes) { const c = {}; codes.forEach((k) => (c[k] = 0)); for (const o of orders) { if (o.cancelled) continue; for (const k in o.items) c[k] = (c[k] || 0) + o.items[k]; } return c; }
 
 /* ---------- main summary tables ---------- */
 function menuSummaryTable() {
@@ -65,12 +66,13 @@ function customerTable() {
     const cells = codes.map((c) => `<td class="num">${o.items[c] ? o.items[c] : '<span class="dot">·</span>'}</td>`).join('');
     const note = o.note ? `<div class="row-note">📝 ${esc(o.note)}</div>` : '';
     const remark = o.remark ? `<div class="row-remark">❓ ${esc(o.remark)} · รอคุณหลียืนยัน</div>` : '';
+    const cancel = o.cancelled ? `<div class="row-cancel">🚫 อาจยกเลิก — คอมเมนต์หายไปก่อนปิดรอบ (ไม่นับยอด)</div>` : '';
     const timeCell = hasTime ? `<td class="time">${fmtTime(o.time)}</td>` : '';
-    return `<tr class="cust-row${o.remark ? ' has-remark' : ''}" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}${remark}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td>${timeCell}<td class="slip">📋</td></tr>`;
+    return `<tr class="cust-row${o.remark ? ' has-remark' : ''}${o.cancelled ? ' cancelled' : ''}" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}${remark}${cancel}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td>${timeCell}<td class="slip">📋</td></tr>`;
   }).join('');
   const totals = tally(DATA.orders, codes);
   const totalRow = codes.map((c) => `<th class="num">${totals[c] || 0}</th>`).join('');
-  const grand = DATA.orders.reduce((a, o) => a + rowTotal(o.items), 0);
+  const grand = DATA.orders.reduce((a, o) => a + (o.cancelled ? 0 : rowTotal(o.items)), 0);
   const timeHead = hasTime ? '<th>เวลาสั่ง</th>' : '';
   const timeFoot = hasTime ? '<th></th>' : '';
   return `<div class="table-scroll"><table class="tbl cust-tbl"><thead><tr><th class="num">#</th><th>ผู้สั่ง</th><th>ปณ.</th>${head}<th class="num">ยอด</th>${timeHead}<th></th></tr></thead><tbody>${body}</tbody><tfoot><tr><th></th><th>รวม</th><th></th>${totalRow}<th class="num">${baht(grand)}</th>${timeFoot}<th></th></tr></tfoot></table></div>`;
@@ -337,6 +339,7 @@ async function main() {
       </div>
       <p class="hint">💡 แตะที่แถวลูกค้าเพื่อเปิด <strong>ใบสรุป (ป๊อปอัพ)</strong> สำหรับแคปหน้าจอส่งลูกค้า</p>
       ${(() => { const r = DATA.orders.filter((o) => o.remark); return r.length ? `<p class="remark-banner">❓ มี <strong>${r.length}</strong> ออเดอร์ที่มีข้อความระบบไม่เข้าใจ รอคุณหลีมาตอบ: ${r.map((o) => '@' + esc(o.user)).join(', ')}</p>` : ''; })()}
+      ${(() => { const c = DATA.orders.filter((o) => o.cancelled); if (!c.length) return ''; const lost = c.reduce((a, o) => a + rowTotal(o.items), 0); return `<p class="cancel-banner">🚫 <strong>${c.length}</strong> ออเดอร์คอมเมนต์หายไปก่อนปิดรอบ — <strong>อาจยกเลิก</strong> (ไม่นับในยอด ~${baht(lost)}): ${c.map((o) => '@' + esc(o.user)).join(', ')} · โปรดตรวจสอบ</p>`; })()}
       <section class="block"><h3>✅ สรุปยอดแต่ละเมนู</h3>${summary.html}<p class="muted small">* ยอดยังไม่รวมค่าจัดส่ง</p></section>
       <section class="block">
         <h3>👥 รายละเอียดรายคน (${DATA.orders.length}) — แตะเพื่อดูใบสรุป</h3>
