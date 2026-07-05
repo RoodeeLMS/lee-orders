@@ -135,6 +135,11 @@ a:hover { text-decoration: underline; }
 .cust-row.cancelled .row-cancel { text-decoration: none; }
 .cancel-banner { background: rgba(120,120,128,.12); border: 1px solid rgba(120,120,128,.4); color: var(--muted);
   border-radius: 12px; padding: 10px 14px; font-size: .88rem; margin: 0 0 16px; }
+/* edited-by-Khun-Lee audit trail: original order kept + shown */
+.row-edited { font-size: .76rem; color: #0b6bcb; margin-top: 2px; white-space: normal; }
+.verify-edited { margin-top: 10px; font-size: .82rem; color: #0b6bcb; background: rgba(11,107,203,.08);
+  border: 1px solid rgba(11,107,203,.3); border-radius: 8px; padding: 8px 10px; }
+.verify-edited .ig-text { color: #374151; }
 .verify-remark { margin-top: 10px; font-size: .82rem; color: var(--red); background: rgba(255,107,107,.1);
   border: 1px solid rgba(255,107,107,.3); border-radius: 8px; padding: 8px 10px; }
 .notes { margin: 0; padding-left: 18px; color: var(--muted); }
