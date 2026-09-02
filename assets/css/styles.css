@@ -334,3 +334,8 @@ a:hover { text-decoration: underline; }
 .hbar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
 .hbar-fill { width: 70%; min-height: 2px; background: linear-gradient(180deg, #ff7a59, #ff5a8a); border-radius: 3px 3px 0 0; transition: height .2s; }
 .hbar-lbl { font-size: 0.6rem; color: #8a8a96; margin-top: 3px; }
+
+/* duplicate-label warning inside the menu-trend block */
+.mt-dup { background: rgba(255,179,71,.10); border: 1px solid rgba(255,179,71,.3); color: var(--accent-2);
+  border-radius: 10px; padding: 9px 12px; font-size: .82rem; margin: 0 0 12px; line-height: 1.6; }
+.mt-dup code { background: rgba(0,0,0,.3); padding: 1px 5px; border-radius: 4px; font-size: .95em; }

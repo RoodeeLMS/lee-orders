@@ -246,37 +246,23 @@ let MENU_TIP = [];         // per-round tooltip payload, rebuilt on each chart r
 const shortRound = (r) => String(r.deliveryDateLabel || r.id).replace(/^\S*ที่\s*/, '').replace(/\s*25\d\d$/, '').trim();
 
 // The same dish gets a different label in different rounds ("หมี่คลุก" / "หมี่คลุกคุณหลี" /
-// "หมี่คลุกซิกเนเจอร์"), which would otherwise split one dish into several short series.
-// Every pair below was confirmed against the round's FULL menu name and price before merging —
-// the left label and the right label are the same product at the same price. Where the dish
-// genuinely differs (สะโพกไก่ปิ้งน้ำย้อย vs สะโพกไก่สไปซี่ย่าง, เบคอนรมควัน 200 vs ย่าง 250)
-// it is deliberately left alone.
-const ITEM_ALIAS = {
-  'หมี่คลุกคุณหลี': 'หมี่คลุก', 'หมี่คลุกซิกเนเจอร์': 'หมี่คลุก',
-  'ขนมปังสังขยา': 'ขนมปังสังขยาคุณรุ่ง',
-  'โรตีสายไหม': 'โรตีสายไหมแม่ป้อม',
-  'สะโพกไก่ปิ้ง': 'สะโพกไก่ปิ้งน้ำย้อย',
-  'สะโพกไก่สไปซี่': 'สะโพกไก่สไปซี่ย่าง',
-  'ซี่โครงหมูต้มสับปะรด': 'ซี่โครงต้มสับปะรด',
-  'ผัดพริกแกงหน่อไม้หมูสับ': 'ผัดพริกแกงหน่อไม้',
-  'ข้าวเหนียวนึ่ง': 'ข้าวเหนียว',
-  'โรลหมูหยอง (เต็ม)': 'โรลหมูหยอง',
-  'Capellini ปลากะพง': 'พาสต้าปลากะพง',
-  'Capellini ปลาแซลมอน': 'พาสต้าปลาแซลมอน',
-  'Capellini ปลาหิมะ': 'พาสต้าปลาหิมะ',
-  'Cold Pasta เพลน': 'โคลด์พาสต้า เพลน',
-  'Cold Pasta ไข่ปลาบิน': 'โคลด์พาสต้า ไข่ปลาบิน',
-  'Cold Pasta ไข่ปลาแซลมอน': 'โคลด์พาสต้า ไข่ปลาแซลมอน',
-  'เซตเพลน (2 เสิร์ฟ)': 'เซตเพลน',
-  'เซตไข่ปลาแซลมอน (2 เสิร์ฟ)': 'เซตไข่ปลาแซลมอน',
-  'น้ำพริกไก่กรุบ (เล็ก)': 'น้ำพริกไก่กรุบ',
-  'น้ำพริกไก่กรุบใหญ่': 'น้ำพริกไก่กรุบ',
-  'น้ำพริกปลาสลิด (กระปุกเล็ก)': 'น้ำพริกปลาสลิด (เล็ก)',
-  'น้ำพริกปลาสลิดเล็ก': 'น้ำพริกปลาสลิด (เล็ก)',
-  'น้ำพริกปลาสลิด (ถุงใหญ่)': 'น้ำพริกปลาสลิด (ใหญ่)',
-  'น้ำพริกปลาสลิดใหญ่': 'น้ำพริกปลาสลิด (ใหญ่)',
-};
+// "หมี่คลุกซิกเนเจอร์"), which would split one dish into several short series. Which labels are
+// the same product is ANALYSIS-ONLY knowledge, so it lives in its own encrypted index
+// (data/menu-aliases.enc.json) rather than in a round def — the round pipeline never reads it
+// and no order slip, name or price changes.
+let ITEM_ALIAS = {};      // label -> canonical label
+let KEEP_APART = new Set(); // reviewed pairs that are genuinely different products
 const canonItem = (name) => ITEM_ALIAS[name] || name;
+
+async function loadAliases(pw) {
+  try {
+    const res = await fetch('data/menu-aliases.enc.json', { cache: 'no-store' });
+    if (!res.ok) return;
+    const cfg = JSON.parse(await decryptBlob(await res.text(), pw));
+    ITEM_ALIAS = cfg.aliases || {};
+    KEEP_APART = new Set((cfg.keepApart || []).map((pair) => pair.slice().sort().join('||')));
+  } catch { /* analytics still works unaliased if the index is missing */ }
+}
 
 // One label can also cover two different products: "น้ำพริกไก่กรุบ" is the ฿100 เล็ก in most
 // rounds but the ฿250 ใหญ่ 500g in two of them. Where a canonical name carries more than one
@@ -452,9 +438,42 @@ function renderMenuBody(rounds) {
   return MENU_VIEW === 'chart' ? menuChartSVG(rounds, S) : menuTableHTML(rounds, S);
 }
 
+// Look-alike labels that are NOT yet in the alias index: same price, and either the same
+// normalised full menu name or one name a prefix of the other, and never on sale in the same
+// round (two labels living side by side in one round are deliberate options, not a duplicate).
+// This is what turns "the chart quietly under-counts a dish" into something visible.
+function suspectedDuplicates() {
+  const normName = (s) => String(s).replace(/\([^)]*\)/g, '').replace(/["']/g, '')
+    .replace(/\s*\d+\s*(g|ก\.|กรัม|ml|มล\.|ชิ้น|อิ่ม|ที่)\b/gi, '').replace(/\s+/g, ' ').trim();
+  const items = {}, coexist = new Set();
+  ROUNDS.forEach((r) => {
+    const labels = (r.menu || []).map((m) => canonItem(m.short || m.name));
+    labels.forEach((a, i) => labels.forEach((b, j) => { if (i < j) coexist.add([a, b].sort().join('||')); }));
+    (r.menu || []).forEach((m) => {
+      const c = canonItem(m.short || m.name);
+      const e = items[c] = items[c] || { price: new Set(), full: new Set() };
+      e.price.add(m.price); e.full.add(normName(m.name));
+    });
+  });
+  const keys = Object.keys(items), out = [];
+  for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) {
+    const a = keys[i], b = keys[j], key = [a, b].sort().join('||');
+    if (coexist.has(key) || KEEP_APART.has(key)) continue;
+    if (![...items[a].price].some((p) => items[b].price.has(p))) continue;
+    const sameFull = [...items[a].full].some((f) => f && items[b].full.has(f));
+    const na = normName(a), nb = normName(b);
+    if (sameFull || (na && nb && (na.startsWith(nb) || nb.startsWith(na)))) out.push([a, b]);
+  }
+  return out;
+}
+
 function renderMenuTrend(rounds) {
   const pool = menuPool();
   if (!pool.length) return '';
+  const dups = suspectedDuplicates();
+  const dupNote = dups.length ? `<p class="mt-dup">⚠️ อาจเป็นเมนูเดียวกันแต่คนละชื่อ ${dups.length} คู่ — ยังแยกเป็นคนละเส้นอยู่:
+    ${dups.slice(0, 8).map(([a, b]) => `<b>${esc(a)}</b> / <b>${esc(b)}</b>`).join(' · ')}${dups.length > 8 ? ' …' : ''}
+    <br><span class="muted">ถ้าเป็นเมนูเดียวกันจริง เพิ่มคู่นั้นใน <code>_local/data-src/menu-aliases.json</code> แล้วเข้ารหัสใหม่ · ถ้าคนละเมนู ใส่ไว้ใน <code>keepApart</code> เพื่อไม่ให้เตือนซ้ำ</span></p>` : '';
   const chips = pool.map((p) => {
     const on = MENU_SEL.includes(p.nm);
     const sw = on ? `<span class="mt-swatch" style="background:${SERIES_COLORS[MENU_SLOT[p.nm]]}"></span>` : '';
@@ -476,6 +495,7 @@ function renderMenuTrend(rounds) {
       <span class="mt-count muted small">เลือกได้สูงสุด ${MENU_MAX} เมนู · ตอนนี้ <b id="mtCount">${MENU_SEL.length}</b></span>
     </div>
     <div class="mt-chips">${chips}</div>
+    ${dupNote}
     <div id="menuTrendBody">${renderMenuBody(rounds)}</div>
     <p class="muted small">* เลือกเมนูจากปุ่มด้านบน (ตัวเลขท้ายปุ่ม = จำนวนรอบที่เมนูนั้นเคยขาย) · แสดงเฉพาะเมนูที่ขายมาแล้วอย่างน้อย 2 รอบ · เส้นจะขาดช่วงในรอบที่ไม่มีเมนูนั้นขาย · เมนูเดียวกันที่เคยตั้งชื่อไม่เหมือนกันในแต่ละรอบถูกรวมเป็นเส้นเดียวแล้ว (ชี้ที่ปุ่มเพื่อดูชื่อที่เคยใช้)</p>
   </section>`;
@@ -599,6 +619,8 @@ async function main() {
   const app = document.getElementById('app');
   app.innerHTML = `<header class="site-header"><div><a class="back" href="index.html">‹ กลับ</a><h1>📊 สถิติ & เทรนด์</h1><p class="muted">${esc(index.site || 'RoodeeLMS')} · กำลังโหลด…</p></div><button class="lock-btn" id="lockBtn" title="ออกจากระบบ">🔓 ล็อก</button></header><main class="container"><p class="empty">⏳ กำลังถอดรหัสข้อมูลทุกรอบ…</p></main>`;
   document.getElementById('lockBtn').addEventListener('click', lock);
+
+  await loadAliases(pw);
 
   ROUNDS = [];
   for (const m of (index.orders || [])) { const d = await loadRound(m.id, pw); if (d) ROUNDS.push(d); }
