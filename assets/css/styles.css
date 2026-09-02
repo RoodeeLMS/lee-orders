@@ -281,6 +281,54 @@ a:hover { text-decoration: underline; }
 .lg.nw { background: #ff7a59; }
 .lg.bk { background: #4aa3ff; }
 
+/* ── Per-menu trend chart (insights) ── */
+.mt-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 12px; }
+.mt-seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.mt-segbtn { background: none; border: 0; color: var(--muted); font-family: inherit; font-size: .85rem;
+  padding: 7px 14px; cursor: pointer; }
+.mt-segbtn:hover { color: var(--text); }
+.mt-segbtn.on { background: linear-gradient(135deg, var(--accent-2), var(--accent)); color: #1a1205; font-weight: 600; }
+.mt-count { margin-left: auto; }
+
+.mt-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 118px; overflow-y: auto; margin: 0 0 14px;
+  padding: 2px 2px 4px; }
+.mt-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; font-family: inherit; font-size: .82rem;
+  cursor: pointer; transition: border-color .12s, color .12s; }
+.mt-chip:hover { border-color: var(--accent); color: var(--text); }
+.mt-chip.on { color: var(--text); border-color: #3d4452; background: #232833; }
+.mt-chip-n { color: #6f7889; font-size: .72rem; font-variant-numeric: tabular-nums; }
+.mt-chip.shake { animation: mtshake .35s; border-color: var(--red); }
+@keyframes mtshake { 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+.mt-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 3px; flex: none; }
+
+.mt-wrap { display: flex; align-items: flex-start; }
+.mt-axis { flex: none; display: block; }
+.mt-scroll { flex: 1; min-width: 0; position: relative; padding-bottom: 2px; }
+.mt-svg { display: block; max-width: none; }
+.mt-grid { stroke: var(--line); stroke-width: 1; }
+.mt-ytick, .mt-xtick { fill: var(--muted); font-size: 11px; font-family: inherit; font-variant-numeric: tabular-nums; }
+.mt-xtick { font-size: 10.5px; }
+.mt-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* 2px ring in the surface colour keeps dots legible where lines cross */
+.mt-dot { stroke: var(--surface); stroke-width: 2; }
+.mt-dlabel { fill: var(--text); font-size: 11.5px; font-family: inherit; }
+.mt-cross { stroke: #3d4452; stroke-width: 1; pointer-events: none; }
+.mt-band { fill: transparent; cursor: crosshair; }
+
+.mt-tip { position: absolute; top: 6px; transform: translateX(-50%); z-index: 5; pointer-events: none;
+  background: #10131a; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+  box-shadow: var(--shadow); font-size: .82rem; min-width: 150px; max-width: 260px; }
+.mt-tip-head { color: var(--accent-2); font-weight: 600; margin-bottom: 5px; white-space: nowrap; }
+.mt-tip-row { display: flex; align-items: center; gap: 7px; padding: 2px 0; }
+.mt-tip-nm { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-tip-v { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 720px) {
+  .mt-count { margin-left: 0; width: 100%; }
+  .mt-chips { max-height: 96px; }
+}
+
 /* ── Order-time histogram ── */
 .hbars { display: flex; align-items: flex-end; gap: 3px; height: 110px; margin: 8px 0 4px; padding-top: 6px; }
 .hbar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }

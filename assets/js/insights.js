@@ -228,6 +228,256 @@ function renderCategories(cats, rounds) {
     <p class="muted small">* หมวดจัดอัตโนมัติจากชื่อเมนู (เมนูแต่ละรอบต่างกัน)</p></section>`;
 }
 
+/* ---------- 📉 per-menu performance across rounds ---------- */
+// Categorical palette validated against this site's dark surface (#181b22):
+// lightness band, chroma floor, CVD ΔE (worst adjacent 8.4), normal-vision ΔE (19.3)
+// and 3:1 contrast all pass. Slots are assigned in fixed order and never cycled —
+// past 8 series the picker stops rather than inventing a 9th hue.
+const SERIES_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
+const MENU_MAX = SERIES_COLORS.length;
+let MENU_METRIC = 'qty';   // 'qty' | 'rev'
+let MENU_VIEW = 'chart';   // 'chart' | 'table'
+let MENU_SEL = [];         // selected menu names, in the order they were added
+let MENU_SLOT = {};        // name -> colour index; held while selected, so removing one never repaints the rest
+let MENU_TIP = [];         // per-round tooltip payload, rebuilt on each chart render
+
+// "อังคารที่ 15 ก.ย. 2569" -> "15 ก.ย."
+const shortRound = (r) => String(r.deliveryDateLabel || r.id).replace(/^\S*ที่\s*/, '').replace(/\s*25\d\d$/, '').trim();
+
+// name -> { offered:Set<roundId>, qty:{roundId}, rev:{roundId}, totQty, totRev }
+// `offered` is seeded from each round's MENU, so a dish that was on sale but sold
+// nothing plots a real 0, while a round that never offered it leaves a gap.
+function menuStats(rounds) {
+  const S = {};
+  const slot = (n) => (S[n] = S[n] || { offered: new Set(), qty: {}, rev: {}, totQty: 0, totRev: 0 });
+  rounds.forEach((r) => {
+    const p = priceMap(r.menu), nm = nameMap(r.menu);
+    (r.menu || []).forEach((m) => slot(m.short || m.name).offered.add(r.id));
+    [...(r.orders || []), ...(r.captionOrders || [])].forEach((o) => {
+      for (const k in o.items) {
+        const e = slot(nm[k] || k);
+        e.offered.add(r.id);
+        e.qty[r.id] = (e.qty[r.id] || 0) + o.items[k];
+        e.rev[r.id] = (e.rev[r.id] || 0) + o.items[k] * (p[k] || 0);
+        e.totQty += o.items[k];
+        e.totRev += o.items[k] * (p[k] || 0);
+      }
+    });
+  });
+  return S;
+}
+
+// Chip pool + default selection come from ALL rounds, so colours and choices
+// survive a month filter instead of being reshuffled by it.
+function menuPool() {
+  const S = menuStats(ROUNDS);
+  return Object.entries(S)
+    .filter(([, d]) => d.totQty > 0 && d.offered.size >= 2)
+    // most-recurring first: this is a trend chart, so the dishes that actually span
+    // rounds lead, and the default picks the ones with a line worth reading
+    .sort((a, b) => b[1].offered.size - a[1].offered.size || b[1].totRev - a[1].totRev)
+    .map(([nm, d]) => ({ nm, rounds: d.offered.size, totQty: d.totQty, totRev: d.totRev }));
+}
+
+function pickSlot(name) {
+  if (MENU_SLOT[name] != null) return MENU_SLOT[name];
+  const used = new Set(Object.values(MENU_SLOT));
+  for (let i = 0; i < MENU_MAX; i++) if (!used.has(i)) return (MENU_SLOT[name] = i);
+  return -1;
+}
+
+// Round the axis up to a whole number of nice ticks — picking the step (not the max)
+// keeps the plot from wasting half its height when one round spikes.
+function niceMax(peak, ticks) {
+  if (!(peak > 0)) return ticks;
+  const p = Math.pow(10, Math.floor(Math.log10(peak / ticks)));
+  const raw = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map((m) => m * p).find((c) => c * ticks >= peak) || 10 * p;
+  const step = Math.max(1, Math.ceil(raw - 1e-9));   // whole-number ticks: both counts and baht are integers
+  return step * ticks;
+}
+
+function menuChartSVG(rounds, S) {
+  const n = rounds.length;
+  const series = MENU_SEL.filter((nm) => S[nm]).map((nm) => ({ nm, color: SERIES_COLORS[MENU_SLOT[nm]], d: S[nm] }));
+  if (!n || !series.length) return `<p class="empty small">เลือกเมนูอย่างน้อย 1 อย่างเพื่อดูกราฟ</p>`;
+
+  const val = (d, id) => (MENU_METRIC === 'qty' ? d.qty[id] : d.rev[id]) || 0;
+  let peak = 0;
+  series.forEach((s) => rounds.forEach((r) => { if (s.d.offered.has(r.id)) peak = Math.max(peak, val(s.d, r.id)); }));
+  const TICKS = 5;
+  const yMax = niceMax(peak, TICKS);
+
+  // The y-axis lives in its own fixed SVG beside the scroller, so the scale stays
+  // on screen while the rounds scroll — losing it was the first thing that broke.
+  const axisW = MENU_METRIC === 'rev' ? 62 : 44, padR = 16, padT = 14, plotH = 240, padB = 44;
+  const colW = Math.max(46, Math.min(96, Math.floor(860 / Math.max(1, n))));
+  const W = n * colW + padR, H = padT + plotH + padB;
+  const x = (i) => colW / 2 + i * colW;
+  const y = (v) => padT + plotH - (v / yMax) * plotH;
+
+  // recessive solid hairline grid + y ticks
+  let grid = '', axis = '';
+  for (let t = 0; t <= TICKS; t++) {
+    const v = (yMax / TICKS) * t, yy = y(v);
+    grid += `<line class="mt-grid" x1="0" y1="${yy}" x2="${W - padR}" y2="${yy}"></line>`;
+    axis += `<text class="mt-ytick" x="${axisW - 8}" y="${yy + 4}" text-anchor="end">${fmt(Math.round(v))}</text>`;
+  }
+  axis += `<line class="mt-grid" x1="${axisW - 0.5}" y1="${padT}" x2="${axisW - 0.5}" y2="${padT + plotH}"></line>`;
+
+  // x labels thin out as rounds pile up; first and last are always kept
+  const every = n <= 16 ? 1 : n <= 30 ? 2 : 3;
+  const xlab = rounds.map((r, i) =>
+    (i % every === 0 || i === n - 1)
+      ? `<text class="mt-xtick" x="${x(i)}" y="${padT + plotH + 18}" text-anchor="middle">${esc(shortRound(r))}</text>`
+      : '').join('');
+
+  // A line only spans rounds where the dish was actually on the menu — gaps stay gaps.
+  let paths = '', dots = '', labels = '';
+  series.forEach((s) => {
+    const segs = []; let cur = [];
+    rounds.forEach((r, i) => {
+      if (!s.d.offered.has(r.id)) { if (cur.length) segs.push(cur); cur = []; return; }
+      cur.push([x(i), y(val(s.d, r.id))]);
+    });
+    if (cur.length) segs.push(cur);
+    segs.forEach((sg) => {
+      if (sg.length > 1) paths += `<polyline class="mt-line" points="${sg.map((p) => p.join(',')).join(' ')}" stroke="${s.color}"></polyline>`;
+      sg.forEach((p) => { dots += `<circle class="mt-dot" cx="${p[0]}" cy="${p[1]}" r="4" fill="${s.color}"></circle>`; });
+    });
+    // ≤4 series also get a direct label at their last point; more than that, the legend carries identity
+    if (series.length <= 4 && segs.length) {
+      const last = segs[segs.length - 1][segs[segs.length - 1].length - 1];
+      if (last[0] < W - padR - 60) labels += `<text class="mt-dlabel" x="${last[0] + 9}" y="${last[1] + 4}">${esc(s.nm)}</text>`;
+    }
+  });
+
+  // hover bands + crosshair; the band is the hit target, far bigger than the dot
+  const bands = rounds.map((_, i) => `<rect class="mt-band" data-i="${i}" x="${i * colW}" y="${padT}" width="${colW}" height="${plotH}"></rect>`).join('');
+
+  MENU_TIP = rounds.map((r) => ({
+    full: String(r.deliveryDateLabel || r.id),
+    rows: series.filter((s) => s.d.offered.has(r.id))
+      .map((s) => ({ nm: s.nm, color: s.color, v: val(s.d, r.id) }))
+      .sort((a, b) => b.v - a.v),
+  }));
+
+  return `<div class="mt-wrap">
+    <svg class="mt-axis" width="${axisW}" height="${H}" aria-hidden="true">${axis}</svg>
+    <div class="table-scroll mt-scroll">
+      <svg class="mt-svg" width="${W}" height="${H}" role="img"
+           aria-label="กราฟยอด${MENU_METRIC === 'rev' ? 'รายได้' : 'จำนวน'}ของแต่ละเมนูในแต่ละรอบ">
+        ${grid}
+        <line class="mt-cross" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" style="display:none"></line>
+        ${paths}${dots}${labels}${xlab}${bands}
+      </svg>
+      <div class="mt-tip" style="display:none"></div>
+    </div>
+  </div>`;
+}
+
+function menuTableHTML(rounds, S) {
+  const series = MENU_SEL.filter((nm) => S[nm]);
+  if (!rounds.length || !series.length) return `<p class="empty small">เลือกเมนูอย่างน้อย 1 อย่างเพื่อดูตาราง</p>`;
+  const val = (d, id) => (MENU_METRIC === 'qty' ? d.qty[id] : d.rev[id]) || 0;
+  const head = rounds.map((r) => `<th class="num" title="${esc(String(r.deliveryDateLabel || r.id))}">${esc(shortRound(r))}</th>`).join('');
+  const body = series.map((nm) => {
+    const d = S[nm];
+    const cells = rounds.map((r) => {
+      if (!d.offered.has(r.id)) return `<td class="num"><span class="dot">·</span></td>`;
+      const v = val(d, r.id);
+      return `<td class="num">${MENU_METRIC === 'rev' ? baht(v) : fmt(v)}</td>`;
+    }).join('');
+    const tot = rounds.reduce((a, r) => a + val(d, r.id), 0);
+    return `<tr><td><span class="mt-swatch" style="background:${SERIES_COLORS[MENU_SLOT[nm]]}"></span>${esc(nm)}</td>${cells}<td class="num total">${MENU_METRIC === 'rev' ? baht(tot) : fmt(tot)}</td></tr>`;
+  }).join('');
+  return `<div class="table-scroll"><table class="tbl"><thead><tr><th>เมนู</th>${head}<th class="num">รวม</th></tr></thead><tbody>${body}</tbody></table></div>
+    <p class="muted small">* "·" = รอบนั้นไม่มีเมนูนี้ขาย (ต่างจาก 0 ที่แปลว่ามีขายแต่ไม่มีใครสั่ง)</p>`;
+}
+
+function renderMenuBody(rounds) {
+  const S = menuStats(rounds);
+  return MENU_VIEW === 'chart' ? menuChartSVG(rounds, S) : menuTableHTML(rounds, S);
+}
+
+function renderMenuTrend(rounds) {
+  const pool = menuPool();
+  if (!pool.length) return '';
+  const chips = pool.map((p) => {
+    const on = MENU_SEL.includes(p.nm);
+    const sw = on ? `<span class="mt-swatch" style="background:${SERIES_COLORS[MENU_SLOT[p.nm]]}"></span>` : '';
+    return `<button class="mt-chip${on ? ' on' : ''}" data-nm="${esc(p.nm)}" title="ขายใน ${p.rounds} รอบ · รวม ${fmt(p.totQty)} รายการ · ${baht(p.totRev)}">${sw}${esc(p.nm)}<span class="mt-chip-n">${p.rounds}</span></button>`;
+  }).join('');
+  return `<section class="block" id="menuTrend">
+    <h3>📉 เทรนด์รายเมนูข้ามรอบ</h3>
+    <div class="mt-controls">
+      <div class="mt-seg" role="group" aria-label="หน่วยที่แสดง">
+        <button class="mt-segbtn${MENU_METRIC === 'qty' ? ' on' : ''}" data-metric="qty">จำนวน</button>
+        <button class="mt-segbtn${MENU_METRIC === 'rev' ? ' on' : ''}" data-metric="rev">รายได้</button>
+      </div>
+      <div class="mt-seg" role="group" aria-label="รูปแบบการแสดงผล">
+        <button class="mt-segbtn${MENU_VIEW === 'chart' ? ' on' : ''}" data-view="chart">กราฟ</button>
+        <button class="mt-segbtn${MENU_VIEW === 'table' ? ' on' : ''}" data-view="table">ตาราง</button>
+      </div>
+      <span class="mt-count muted small">เลือกได้สูงสุด ${MENU_MAX} เมนู · ตอนนี้ <b id="mtCount">${MENU_SEL.length}</b></span>
+    </div>
+    <div class="mt-chips">${chips}</div>
+    <div id="menuTrendBody">${renderMenuBody(rounds)}</div>
+    <p class="muted small">* เลือกเมนูจากปุ่มด้านบน (ตัวเลขท้ายปุ่ม = จำนวนรอบที่เมนูนั้นเคยขาย) · แสดงเฉพาะเมนูที่ขายมาแล้วอย่างน้อย 2 รอบ · เส้นจะขาดช่วงในรอบที่ไม่มีเมนูนั้นขาย</p>
+  </section>`;
+}
+
+function bindMenuTrend(rounds) {
+  const sec = document.getElementById('menuTrend');
+  if (!sec) return;
+  const redraw = () => {
+    document.getElementById('menuTrendBody').innerHTML = renderMenuBody(rounds);
+    bindMenuHover();
+  };
+  sec.querySelectorAll('.mt-segbtn').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.metric) { MENU_METRIC = b.dataset.metric; sec.querySelectorAll('[data-metric]').forEach((x) => x.classList.toggle('on', x === b)); }
+    else { MENU_VIEW = b.dataset.view; sec.querySelectorAll('[data-view]').forEach((x) => x.classList.toggle('on', x === b)); }
+    redraw();
+  }));
+  sec.querySelectorAll('.mt-chip').forEach((b) => b.addEventListener('click', () => {
+    const nm = b.dataset.nm, i = MENU_SEL.indexOf(nm);
+    if (i >= 0) { MENU_SEL.splice(i, 1); delete MENU_SLOT[nm]; }
+    else if (MENU_SEL.length >= MENU_MAX) { b.classList.add('shake'); setTimeout(() => b.classList.remove('shake'), 400); return; }
+    else { MENU_SEL.push(nm); pickSlot(nm); }
+    const on = MENU_SEL.includes(nm);
+    b.classList.toggle('on', on);
+    b.innerHTML = (on ? `<span class="mt-swatch" style="background:${SERIES_COLORS[MENU_SLOT[nm]]}"></span>` : '') + esc(nm) + b.querySelector('.mt-chip-n').outerHTML;
+    document.getElementById('mtCount').textContent = MENU_SEL.length;
+    redraw();
+  }));
+  bindMenuHover();
+}
+
+function bindMenuHover() {
+  const wrap = document.querySelector('#menuTrend .mt-wrap');
+  if (!wrap) return;
+  const scroll = wrap.querySelector('.mt-scroll');
+  if (scroll) scroll.scrollLeft = scroll.scrollWidth;   // open on the most recent rounds
+  const tip = wrap.querySelector('.mt-tip'), cross = wrap.querySelector('.mt-cross');
+  const hide = () => { tip.style.display = 'none'; cross.style.display = 'none'; };
+  wrap.querySelectorAll('.mt-band').forEach((band) => {
+    const show = () => {
+      const i = +band.dataset.i, t = MENU_TIP[i];
+      if (!t) return;
+      const cx = +band.getAttribute('x') + +band.getAttribute('width') / 2;
+      cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); cross.style.display = '';
+      tip.innerHTML = `<div class="mt-tip-head">${esc(t.full)}</div>`
+        + (t.rows.length ? t.rows.map((r) => `<div class="mt-tip-row"><span class="mt-swatch" style="background:${r.color}"></span><span class="mt-tip-nm">${esc(r.nm)}</span><span class="mt-tip-v">${MENU_METRIC === 'rev' ? baht(r.v) : fmt(r.v)}</span></div>`).join('')
+          : `<div class="mt-tip-row muted">ไม่มีเมนูที่เลือกในรอบนี้</div>`);
+      tip.style.display = '';
+      tip.style.left = cx + 'px';
+    };
+    band.addEventListener('mouseenter', show);
+    band.addEventListener('mousemove', show);
+    band.addEventListener('click', show);
+  });
+  wrap.addEventListener('mouseleave', hide);
+}
+
 function renderTopItems(topItems) {
   const rows = topItems.map((t) => `<tr><td>${esc(t.label)}</td><td>${t.top.join(' · ')}</td></tr>`).join('');
   return `<section class="block"><h3>🏆 เมนูขายดีแต่ละรอบ</h3><div class="table-scroll"><table class="tbl"><thead><tr><th>รอบ</th><th>ขายดีสุด (ตามจำนวน)</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
@@ -263,10 +513,13 @@ function renderDyn() {
     ${SEL !== 'all' ? `<p class="scope-note">กำลังดูเฉพาะเดือน <b>${esc(scopeLabel)}</b> · <a href="#" id="clearScope">ดูทุกเดือน</a></p>` : ''}
     ${renderTrend(rs)}
     ${renderCategories(cats, rs)}
+    ${renderMenuTrend(rounds)}
     ${renderTopItems(topItems)}
     ${renderTopDishes(rounds)}
     ${renderOrderTimes(rounds)}
     ${renderCustomers(cust, scopeLabel)}`;
+
+  bindMenuTrend(rounds);
 
   const search = document.getElementById('custSearch');
   if (search) search.addEventListener('input', () => {
@@ -300,6 +553,9 @@ async function main() {
 
   const monthly = monthlyRollup();
   MONTHS = monthly.map((m) => ({ key: m.key, label: m.label, short: m.short }));
+
+  // seed the menu-trend picker: the 5 biggest earners that have run in 2+ rounds
+  menuPool().slice(0, 5).forEach((p) => { MENU_SEL.push(p.nm); pickSlot(p.nm); });
 
   app.innerHTML = `
     <header class="site-header"><div><a class="back" href="index.html">‹ กลับ</a><h1>📊 สถิติ & เทรนด์</h1>
