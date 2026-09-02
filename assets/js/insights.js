@@ -370,23 +370,23 @@ function menuChartSVG(rounds, S) {
       ? `<text class="mt-xtick" x="${x(i)}" y="${padT + plotH + 18}" text-anchor="middle">${esc(shortRound(r))}</text>`
       : '').join('');
 
-  // A line only spans rounds where the dish was actually on the menu — gaps stay gaps.
+  // Every appearance of a dish is joined to the next one, so a dish that runs every few rounds
+  // still reads as a trend. The join says which it is: SOLID between back-to-back rounds, DASHED
+  // where the dish skipped rounds in between — so the line is never read as sales it didn't make.
   let paths = '', dots = '', labels = '';
   series.forEach((s) => {
-    const segs = []; let cur = [];
-    rounds.forEach((r, i) => {
-      if (!s.d.offered.has(r.id)) { if (cur.length) segs.push(cur); cur = []; return; }
-      cur.push([x(i), y(val(s.d, r.id))]);
-    });
-    if (cur.length) segs.push(cur);
-    segs.forEach((sg) => {
-      if (sg.length > 1) paths += `<polyline class="mt-line" points="${sg.map((p) => p.join(',')).join(' ')}" stroke="${s.color}"></polyline>`;
-      sg.forEach((p) => { dots += `<circle class="mt-dot" cx="${p[0]}" cy="${p[1]}" r="4" fill="${s.color}"></circle>`; });
-    });
+    const pts = [];   // [roundIndex, x, y] for every round that offered it
+    rounds.forEach((r, i) => { if (s.d.offered.has(r.id)) pts.push([i, x(i), y(val(s.d, r.id))]); });
+    for (let k = 1; k < pts.length; k++) {
+      const a = pts[k - 1], b = pts[k];
+      const cls = b[0] - a[0] === 1 ? 'mt-line' : 'mt-line-gap';
+      paths += `<line class="${cls}" x1="${a[1]}" y1="${a[2]}" x2="${b[1]}" y2="${b[2]}" stroke="${s.color}"></line>`;
+    }
+    pts.forEach((p) => { dots += `<circle class="mt-dot" cx="${p[1]}" cy="${p[2]}" r="4" fill="${s.color}"></circle>`; });
     // ≤4 series also get a direct label at their last point; more than that, the legend carries identity
-    if (series.length <= 4 && segs.length) {
-      const last = segs[segs.length - 1][segs[segs.length - 1].length - 1];
-      if (last[0] < W - padR - 60) labels += `<text class="mt-dlabel" x="${last[0] + 9}" y="${last[1] + 4}">${esc(s.nm)}</text>`;
+    if (series.length <= 4 && pts.length) {
+      const last = pts[pts.length - 1];
+      if (last[1] < W - padR - 60) labels += `<text class="mt-dlabel" x="${last[1] + 9}" y="${last[2] + 4}">${esc(s.nm)}</text>`;
     }
   });
 
@@ -497,7 +497,7 @@ function renderMenuTrend(rounds) {
     <div class="mt-chips">${chips}</div>
     ${dupNote}
     <div id="menuTrendBody">${renderMenuBody(rounds)}</div>
-    <p class="muted small">* เลือกเมนูจากปุ่มด้านบน (ตัวเลขท้ายปุ่ม = จำนวนรอบที่เมนูนั้นเคยขาย) · แสดงเฉพาะเมนูที่ขายมาแล้วอย่างน้อย 2 รอบ · เส้นจะขาดช่วงในรอบที่ไม่มีเมนูนั้นขาย · เมนูเดียวกันที่เคยตั้งชื่อไม่เหมือนกันในแต่ละรอบถูกรวมเป็นเส้นเดียวแล้ว (ชี้ที่ปุ่มเพื่อดูชื่อที่เคยใช้)</p>
+    <p class="muted small">* เลือกเมนูจากปุ่มด้านบน (ตัวเลขท้ายปุ่ม = จำนวนรอบที่เมนูนั้นเคยขาย) · แสดงเฉพาะเมนูที่ขายมาแล้วอย่างน้อย 2 รอบ · เส้นทึบ = ขายติดกันสองรอบ, เส้นประ = รอบที่คั่นอยู่ไม่มีเมนูนี้ขาย (ไม่ใช่ยอดขาย) · เมนูเดียวกันที่เคยตั้งชื่อไม่เหมือนกันในแต่ละรอบถูกรวมเป็นเส้นเดียวแล้ว (ชี้ที่ปุ่มเพื่อดูชื่อที่เคยใช้)</p>
   </section>`;
 }
 
