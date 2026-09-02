@@ -167,7 +167,8 @@ function renderTopDishes(rounds) {
     [...(r.orders || []), ...(r.captionOrders || [])].forEach((o) => {
       for (const k in o.items) {
         const mi = r.menu.find((m) => m.code === k) || {};
-        const nm = mi.short || mi.name || k;
+        // same dish, different label per round -> one row (see ITEM_ALIAS)
+        const nm = itemLabel(mi.short || mi.name || k, p[k]);
         agg[nm] = agg[nm] || { qty: 0, rev: 0 };
         agg[nm].qty += o.items[k]; agg[nm].rev += o.items[k] * (p[k] || 0);
       }
@@ -244,7 +245,59 @@ let MENU_TIP = [];         // per-round tooltip payload, rebuilt on each chart r
 // "อังคารที่ 15 ก.ย. 2569" -> "15 ก.ย."
 const shortRound = (r) => String(r.deliveryDateLabel || r.id).replace(/^\S*ที่\s*/, '').replace(/\s*25\d\d$/, '').trim();
 
-// name -> { offered:Set<roundId>, qty:{roundId}, rev:{roundId}, totQty, totRev }
+// The same dish gets a different label in different rounds ("หมี่คลุก" / "หมี่คลุกคุณหลี" /
+// "หมี่คลุกซิกเนเจอร์"), which would otherwise split one dish into several short series.
+// Every pair below was confirmed against the round's FULL menu name and price before merging —
+// the left label and the right label are the same product at the same price. Where the dish
+// genuinely differs (สะโพกไก่ปิ้งน้ำย้อย vs สะโพกไก่สไปซี่ย่าง, เบคอนรมควัน 200 vs ย่าง 250)
+// it is deliberately left alone.
+const ITEM_ALIAS = {
+  'หมี่คลุกคุณหลี': 'หมี่คลุก', 'หมี่คลุกซิกเนเจอร์': 'หมี่คลุก',
+  'ขนมปังสังขยา': 'ขนมปังสังขยาคุณรุ่ง',
+  'โรตีสายไหม': 'โรตีสายไหมแม่ป้อม',
+  'สะโพกไก่ปิ้ง': 'สะโพกไก่ปิ้งน้ำย้อย',
+  'สะโพกไก่สไปซี่': 'สะโพกไก่สไปซี่ย่าง',
+  'ซี่โครงหมูต้มสับปะรด': 'ซี่โครงต้มสับปะรด',
+  'ผัดพริกแกงหน่อไม้หมูสับ': 'ผัดพริกแกงหน่อไม้',
+  'ข้าวเหนียวนึ่ง': 'ข้าวเหนียว',
+  'โรลหมูหยอง (เต็ม)': 'โรลหมูหยอง',
+  'Capellini ปลากะพง': 'พาสต้าปลากะพง',
+  'Capellini ปลาแซลมอน': 'พาสต้าปลาแซลมอน',
+  'Capellini ปลาหิมะ': 'พาสต้าปลาหิมะ',
+  'Cold Pasta เพลน': 'โคลด์พาสต้า เพลน',
+  'Cold Pasta ไข่ปลาบิน': 'โคลด์พาสต้า ไข่ปลาบิน',
+  'Cold Pasta ไข่ปลาแซลมอน': 'โคลด์พาสต้า ไข่ปลาแซลมอน',
+  'เซตเพลน (2 เสิร์ฟ)': 'เซตเพลน',
+  'เซตไข่ปลาแซลมอน (2 เสิร์ฟ)': 'เซตไข่ปลาแซลมอน',
+  'น้ำพริกไก่กรุบ (เล็ก)': 'น้ำพริกไก่กรุบ',
+  'น้ำพริกไก่กรุบใหญ่': 'น้ำพริกไก่กรุบ',
+  'น้ำพริกปลาสลิด (กระปุกเล็ก)': 'น้ำพริกปลาสลิด (เล็ก)',
+  'น้ำพริกปลาสลิดเล็ก': 'น้ำพริกปลาสลิด (เล็ก)',
+  'น้ำพริกปลาสลิด (ถุงใหญ่)': 'น้ำพริกปลาสลิด (ใหญ่)',
+  'น้ำพริกปลาสลิดใหญ่': 'น้ำพริกปลาสลิด (ใหญ่)',
+};
+const canonItem = (name) => ITEM_ALIAS[name] || name;
+
+// One label can also cover two different products: "น้ำพริกไก่กรุบ" is the ฿100 เล็ก in most
+// rounds but the ฿250 ใหญ่ 500g in two of them. Where a canonical name carries more than one
+// price across the whole history, the price goes into the label so they stay apart.
+let ITEM_PRICES = {};   // canonical name -> Set<price>, built once from ROUNDS
+let ITEM_VARIANTS = {}; // canonical name -> Set<original label>, for the chip tooltip
+
+function buildItemIndex() {
+  ITEM_PRICES = {}; ITEM_VARIANTS = {};
+  ROUNDS.forEach((r) => (r.menu || []).forEach((m) => {
+    const raw = m.short || m.name, c = canonItem(raw);
+    (ITEM_PRICES[c] = ITEM_PRICES[c] || new Set()).add(m.price);
+    (ITEM_VARIANTS[c] = ITEM_VARIANTS[c] || new Set()).add(raw);
+  }));
+}
+const itemLabel = (raw, price) => {
+  const c = canonItem(raw);
+  return (ITEM_PRICES[c] && ITEM_PRICES[c].size > 1) ? `${c} (฿${fmt(price)})` : c;
+};
+
+// label -> { offered:Set<roundId>, qty:{roundId}, rev:{roundId}, totQty, totRev }
 // `offered` is seeded from each round's MENU, so a dish that was on sale but sold
 // nothing plots a real 0, while a round that never offered it leaves a gap.
 function menuStats(rounds) {
@@ -252,10 +305,10 @@ function menuStats(rounds) {
   const slot = (n) => (S[n] = S[n] || { offered: new Set(), qty: {}, rev: {}, totQty: 0, totRev: 0 });
   rounds.forEach((r) => {
     const p = priceMap(r.menu), nm = nameMap(r.menu);
-    (r.menu || []).forEach((m) => slot(m.short || m.name).offered.add(r.id));
+    (r.menu || []).forEach((m) => slot(itemLabel(m.short || m.name, m.price)).offered.add(r.id));
     [...(r.orders || []), ...(r.captionOrders || [])].forEach((o) => {
       for (const k in o.items) {
-        const e = slot(nm[k] || k);
+        const e = slot(itemLabel(nm[k] || k, p[k]));
         e.offered.add(r.id);
         e.qty[r.id] = (e.qty[r.id] || 0) + o.items[k];
         e.rev[r.id] = (e.rev[r.id] || 0) + o.items[k] * (p[k] || 0);
@@ -405,7 +458,9 @@ function renderMenuTrend(rounds) {
   const chips = pool.map((p) => {
     const on = MENU_SEL.includes(p.nm);
     const sw = on ? `<span class="mt-swatch" style="background:${SERIES_COLORS[MENU_SLOT[p.nm]]}"></span>` : '';
-    return `<button class="mt-chip${on ? ' on' : ''}" data-nm="${esc(p.nm)}" title="ขายใน ${p.rounds} รอบ · รวม ${fmt(p.totQty)} รายการ · ${baht(p.totRev)}">${sw}${esc(p.nm)}<span class="mt-chip-n">${p.rounds}</span></button>`;
+    const vs = ITEM_VARIANTS[canonItem(p.nm.replace(/ \(฿[\d,]+\)$/, ''))];
+    const alsoAs = vs && vs.size > 1 ? ` · รวมชื่อที่เคยใช้: ${[...vs].join(' / ')}` : '';
+    return `<button class="mt-chip${on ? ' on' : ''}" data-nm="${esc(p.nm)}" title="ขายใน ${p.rounds} รอบ · รวม ${fmt(p.totQty)} รายการ · ${baht(p.totRev)}${esc(alsoAs)}">${sw}${esc(p.nm)}<span class="mt-chip-n">${p.rounds}</span></button>`;
   }).join('');
   return `<section class="block" id="menuTrend">
     <h3>📉 เทรนด์รายเมนูข้ามรอบ</h3>
@@ -422,7 +477,7 @@ function renderMenuTrend(rounds) {
     </div>
     <div class="mt-chips">${chips}</div>
     <div id="menuTrendBody">${renderMenuBody(rounds)}</div>
-    <p class="muted small">* เลือกเมนูจากปุ่มด้านบน (ตัวเลขท้ายปุ่ม = จำนวนรอบที่เมนูนั้นเคยขาย) · แสดงเฉพาะเมนูที่ขายมาแล้วอย่างน้อย 2 รอบ · เส้นจะขาดช่วงในรอบที่ไม่มีเมนูนั้นขาย</p>
+    <p class="muted small">* เลือกเมนูจากปุ่มด้านบน (ตัวเลขท้ายปุ่ม = จำนวนรอบที่เมนูนั้นเคยขาย) · แสดงเฉพาะเมนูที่ขายมาแล้วอย่างน้อย 2 รอบ · เส้นจะขาดช่วงในรอบที่ไม่มีเมนูนั้นขาย · เมนูเดียวกันที่เคยตั้งชื่อไม่เหมือนกันในแต่ละรอบถูกรวมเป็นเส้นเดียวแล้ว (ชี้ที่ปุ่มเพื่อดูชื่อที่เคยใช้)</p>
   </section>`;
 }
 
@@ -550,6 +605,8 @@ async function main() {
   ROUNDS.sort((a, b) => String(a.deliveryDate || a.id).localeCompare(String(b.deliveryDate || b.id)));
 
   if (!ROUNDS.length) { app.querySelector('main').innerHTML = '<p class="empty">ยังไม่มีข้อมูลรอบ</p>'; return; }
+
+  buildItemIndex();
 
   const monthly = monthlyRollup();
   MONTHS = monthly.map((m) => ({ key: m.key, label: m.label, short: m.short }));
