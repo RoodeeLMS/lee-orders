@@ -455,14 +455,34 @@ function suspectedDuplicates() {
       e.price.add(m.price); e.full.add(normName(m.name));
     });
   });
+  // "ขนมจีนเขียวหวานไก่" vs "ขนมจีนแกงเขียวหวานไก่" differ by an inserted word in the MIDDLE,
+  // so prefix/suffix tests miss them. oneChunk covers any single contiguous insertion.
+  const oneChunk = (a, b) => {
+    if (a.length >= b.length) return false;
+    let p = 0; while (p < a.length && a[p] === b[p]) p++;
+    let s = 0; while (s < a.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+    return p + s === a.length;
+  };
+  const alike = (x, y) => {
+    const a = normName(x), b = normName(y);
+    if (!a || !b) return false;
+    return a === b || a.startsWith(b) || b.startsWith(a) || oneChunk(a, b) || oneChunk(b, a);
+  };
+  // an option variant ("… (ไม่ตับ)") inherits its base label's verdict, so one keepApart entry
+  // settles a whole family instead of needing one per variant
+  const base = (s) => String(s).replace(/\s*\([^)]*\)\s*$/, '').trim();
+  const settled = (a, b) => {
+    const k1 = [a, b].sort().join('||'), k2 = [base(a), base(b)].sort().join('||');
+    return coexist.has(k1) || KEEP_APART.has(k1) || coexist.has(k2) || KEEP_APART.has(k2);
+  };
+
   const keys = Object.keys(items), out = [];
   for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) {
-    const a = keys[i], b = keys[j], key = [a, b].sort().join('||');
-    if (coexist.has(key) || KEEP_APART.has(key)) continue;
+    const a = keys[i], b = keys[j];
+    if (settled(a, b)) continue;
     if (![...items[a].price].some((p) => items[b].price.has(p))) continue;
-    const sameFull = [...items[a].full].some((f) => f && items[b].full.has(f));
-    const na = normName(a), nb = normName(b);
-    if (sameFull || (na && nb && (na.startsWith(nb) || nb.startsWith(na)))) out.push([a, b]);
+    const sameFull = [...items[a].full].some((f) => [...items[b].full].some((g) => alike(f, g)));
+    if (sameFull || alike(a, b)) out.push([a, b]);
   }
   return out;
 }
