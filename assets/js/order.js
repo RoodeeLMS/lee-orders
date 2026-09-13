@@ -66,7 +66,8 @@ function customerTable() {
     const cells = codes.map((c) => `<td class="num">${o.items[c] ? o.items[c] : '<span class="dot">·</span>'}</td>`).join('');
     const note = o.note ? `<div class="row-note">📝 ${esc(o.note)}</div>` : '';
     const remark = o.remark ? `<div class="row-remark">❓ ${esc(o.remark)} · รอคุณหลียืนยัน</div>` : '';
-    const cancel = o.cancelled ? `<div class="row-cancel">🚫 อาจยกเลิก — คอมเมนต์หายไปก่อนปิดรอบ (ไม่นับยอด)</div>` : '';
+    const cancel = o.movedTo ? `<div class="row-cancel">📦 ${esc(o.movedTo)} (ไม่นับยอดรอบนี้)</div>`
+      : o.cancelled ? `<div class="row-cancel">🚫 อาจยกเลิก — คอมเมนต์หายไปก่อนปิดรอบ (ไม่นับยอด)</div>` : '';
     const edited = o.editedFrom ? `<div class="row-edited">✏️ คุณหลีแก้จากเดิม: ${esc(o.editedFrom)}</div>` : '';
     const timeCell = hasTime ? `<td class="time">${fmtTime(o.time)}</td>` : '';
     return `<tr class="cust-row${o.remark ? ' has-remark' : ''}${o.cancelled ? ' cancelled' : ''}" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}${remark}${cancel}${edited}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td>${timeCell}<td class="slip">📋</td></tr>`;
@@ -341,7 +342,7 @@ async function main() {
       </div>
       <p class="hint">💡 แตะที่แถวลูกค้าเพื่อเปิด <strong>ใบสรุป (ป๊อปอัพ)</strong> สำหรับแคปหน้าจอส่งลูกค้า</p>
       ${(() => { const r = DATA.orders.filter((o) => o.remark); return r.length ? `<p class="remark-banner">❓ มี <strong>${r.length}</strong> ออเดอร์ที่มีข้อความระบบไม่เข้าใจ รอคุณหลีมาตอบ: ${r.map((o) => '@' + esc(o.user)).join(', ')}</p>` : ''; })()}
-      ${(() => { const c = DATA.orders.filter((o) => o.cancelled); if (!c.length) return ''; const lost = c.reduce((a, o) => a + rowTotal(o.items), 0); return `<p class="cancel-banner">🚫 <strong>${c.length}</strong> ออเดอร์คอมเมนต์หายไปก่อนปิดรอบ — <strong>อาจยกเลิก</strong> (ไม่นับในยอด ~${baht(lost)}): ${c.map((o) => '@' + esc(o.user)).join(', ')} · โปรดตรวจสอบ</p>`; })()}
+      ${(() => { const c = DATA.orders.filter((o) => o.cancelled && !o.movedTo); if (!c.length) return ''; const lost = c.reduce((a, o) => a + rowTotal(o.items), 0); return `<p class="cancel-banner">🚫 <strong>${c.length}</strong> ออเดอร์คอมเมนต์หายไปก่อนปิดรอบ — <strong>อาจยกเลิก</strong> (ไม่นับในยอด ~${baht(lost)}): ${c.map((o) => '@' + esc(o.user)).join(', ')} · โปรดตรวจสอบ</p>`; })()}
       <section class="block"><h3>✅ สรุปยอดแต่ละเมนู</h3>${summary.html}<p class="muted small">* ยอดยังไม่รวมค่าจัดส่ง</p></section>
       <section class="block">
         <h3>👥 รายละเอียดรายคน (${DATA.orders.length}) — แตะเพื่อดูใบสรุป</h3>

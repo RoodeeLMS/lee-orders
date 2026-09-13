@@ -644,6 +644,8 @@ async function main() {
 
   ROUNDS = [];
   for (const m of (index.orders || [])) { const d = await loadRound(m.id, pw); if (d) ROUNDS.push(d); }
+  // cancelled / moved-to-a-later-round orders are excluded from totals, same as the round page
+  ROUNDS.forEach((r) => { if (r.orders) r.orders = r.orders.filter((o) => !o.cancelled); });
   ROUNDS.sort((a, b) => String(a.deliveryDate || a.id).localeCompare(String(b.deliveryDate || b.id)));
 
   if (!ROUNDS.length) { app.querySelector('main').innerHTML = '<p class="empty">ยังไม่มีข้อมูลรอบ</p>'; return; }
