@@ -68,7 +68,8 @@ function customerTable() {
     const remark = o.remark ? `<div class="row-remark">❓ ${esc(o.remark)} · รอคุณหลียืนยัน</div>` : '';
     const cancel = o.movedTo ? `<div class="row-cancel">📦 ${esc(o.movedTo)} (ไม่นับยอดรอบนี้)</div>`
       : o.cancelled ? `<div class="row-cancel">🚫 อาจยกเลิก — คอมเมนต์หายไปก่อนปิดรอบ (ไม่นับยอด)</div>` : '';
-    const edited = o.editedFrom ? `<div class="row-edited">✏️ คุณหลีแก้จากเดิม: ${esc(o.editedFrom)}</div>` : '';
+    const edited = o.editedFrom ? `<div class="row-edited">✏️ คุณหลีแก้จากเดิม: ${esc(o.editedFrom)}</div>`
+      : o.normalizedFrom ? `<div class="row-edited">📄 ข้อความเดิมของลูกค้า: ${esc(o.normalizedFrom)}</div>` : '';
     const timeCell = hasTime ? `<td class="time">${fmtTime(o.time)}</td>` : '';
     return `<tr class="cust-row${o.remark ? ' has-remark' : ''}${o.cancelled ? ' cancelled' : ''}" data-kind="order" data-i="${i}"><td class="num idx">${n + 1}</td><td class="user">@${esc(o.user)}${note}${remark}${cancel}${edited}</td><td class="zip">${esc(o.zip || '-')}</td>${cells}<td class="num total">${baht(rowTotal(o.items))}</td>${timeCell}<td class="slip">📋</td></tr>`;
   }).join('');
@@ -263,6 +264,7 @@ function openPopup(order) {
         </div>
         <div class="verify-parsed">ระบบอ่านได้: ${DATA.displayColumns.filter((c) => order.items[c]).map((c) => `${esc(shortName(c))} ×${order.items[c]}`).join(' · ')}</div>
         ${order.editedFrom ? `<div class="verify-edited">✏️ <b>คุณหลีแก้ออเดอร์นี้</b> — ของเดิมก่อนแก้: <span class="ig-text">${esc(order.editedFrom)}</span></div>` : ''}
+        ${order.normalizedFrom ? `<div class="verify-edited">📄 <b>ข้อความเดิมของลูกค้า</b> (ระบบจัดรูปแบบ/รวมรายการให้อ่านง่าย — ไม่ใช่คุณหลีแก้): <span class="ig-text">${esc(order.normalizedFrom)}</span></div>` : ''}
         ${order.remark ? `<div class="verify-remark">❓ ข้อความที่ระบบไม่เข้าใจ: <b>${esc(order.remark)}</b><br>รอคุณหลีมาตอบ/ยืนยันว่าหมายถึงอะไร (ยังไม่ถูกนับเป็นเมนู)</div>` : ''}
         ${DATA.source && DATA.source.url ? `<a class="verify-link" href="${esc(DATA.source.url)}" target="_blank" rel="noopener">เปิดโพสต์ต้นฉบับบน Instagram ↗</a>` : ''}
       </div>
