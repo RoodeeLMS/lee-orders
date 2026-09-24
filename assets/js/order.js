@@ -92,10 +92,11 @@ function captionSection() {
 }
 
 /* ---------- shipping (auto-default by postal code) ---------- */
-// กทม.+ปริมณฑล (BKK + นนทบุรี/ปทุมธานี/สมุทรปราการ/นครปฐม/สมุทรสาคร) ship cheaper; ต่างจังหวัด is cold-courier.
+// กทม.+ปริมณฑล (BKK + นนทบุรี/ปทุมธานี/สมุทรปราการ) ship cheaper; ต่างจังหวัด is cold-courier.
+// Khun Lee (DM 24/9/2569): นครปฐม (73xxx) and สมุทรสาคร (74xxx) are ต่างจังหวัด, NOT ปริมณฑล.
 // All values are overridable per round via DATA, and the amount stays editable in the popup.
 function shippingZone(order) {
-  const metro = DATA.shippingMetroPrefixes || ['10', '11', '12', '73', '74'];
+  const metro = DATA.shippingMetroPrefixes || ['10', '11', '12'];
   if (!order.zip) return { fee: DATA.shippingDefault ?? 100, label: 'ไม่ระบุ ปณ. — ตรวจสอบ', auto: false };
   if (metro.includes(order.zip.slice(0, 2)))
     return { fee: DATA.shippingBkk ?? DATA.shippingDefault ?? 100, label: 'กทม./ปริมณฑล', auto: true };
