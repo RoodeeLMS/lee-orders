@@ -4,7 +4,8 @@ import { requireUnlock, lock } from './gate.js';
 const STATUS_LABEL = {
   open: { text: 'เปิดรับออเดอร์', cls: 'badge-open' },
   closed: { text: 'ปิดรอบแล้ว', cls: 'badge-closed' },
-  delivered: { text: 'จัดส่งแล้ว', cls: 'badge-done' }
+  delivered: { text: 'จัดส่งแล้ว', cls: 'badge-done' },
+  cancelled: { text: 'ยกเลิกรอบ', cls: 'badge-cancelled' }
 };
 
 function card(o) {
