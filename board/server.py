@@ -34,10 +34,15 @@ HTTP :8080
   GET  /api/slip/<id>            the image
   POST /api/slip/<id>/delete     uploader or admins
   POST /api/round-status {round, status}
-CLI
-  python server.py inbox [since_epoch]   JSON of events + open notes since a timestamp
+  GET  /api/round/<id>/history   every event on the round, newest first
+  GET  /api/system               when the system last read comments / synced / read Lee's replies
+  GET  /api/analytics?range=all|90|365   sales, dishes, customers, areas, weekdays
+CLI (run by Claude through Portainer exec; everything it writes is attributed to SYSTEM_USER)
+  python server.py inbox [since_epoch] [--mark]   JSON of events + open notes; --mark logs inbox_read
+  python server.py log <kind> <round|-> [json] [--at epoch]   e.g. kind scan / sync
+  python server.py note-done <id> [reply]
 """
-import csv, hashlib, io, json, os, re, sqlite3, sys, threading, time, urllib.parse
+import csv, datetime, hashlib, io, json, os, re, sqlite3, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DATA = os.environ.get('LEE_DATA', '/data')
@@ -46,6 +51,8 @@ DB = os.path.join(DATA, 'lee.db')
 SLIPS = os.path.join(DATA, 'slips')
 SLIP_MAX = 8 * 1024 * 1024
 ROUND_STATUSES = ('open', 'closed', 'delivered', 'cancelled')
+SYSTEM_USER = 'claude'   # no Authelia account has this name, so the web side can never act as it
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOCK = threading.Lock()
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
@@ -205,6 +212,17 @@ def round_view(rid):
         for r in c.execute('SELECT id, okey, by, at FROM slips WHERE round_id=? ORDER BY id', (rid,)):
             slips.setdefault(r['okey'], []).append({'id': r['id'], 'by': r['by'], 'at': r['at']})
         status, override = round_status(c, rid, d.get('status'))
+        acts = {}   # okey -> {'paid': (by, at, via), 'shipped': ..., 'fee': ...}: the LAST change of each
+        for e in c.execute("SELECT by, at, kind, okey, payload FROM events WHERE round_id=? AND kind IN ('status','slip') ORDER BY id", (rid,)):
+            pl = json.loads(e['payload']) if e['payload'] else {}
+            a = acts.setdefault(e['okey'], {})
+            if e['kind'] == 'slip':
+                a['paid'] = (e['by'], e['at'], 'slip')
+            for f in ('paid', 'shipped', 'fee'):
+                if f in pl:
+                    a[f] = (e['by'], e['at'], None)
+        last_scan = c.execute("SELECT by, at, payload FROM events WHERE round_id=? AND kind='scan' ORDER BY id DESC LIMIT 1", (rid,)).fetchone()
+        last_scan = dict(last_scan, payload=json.loads(last_scan['payload'] or 'null')) if last_scan else None
     orders = []
     for cap, lst in ((False, d.get('orders', [])), (True, d.get('captionOrders', []))):
         for o in lst:
@@ -223,6 +241,7 @@ def round_view(rid):
                 'paid': bool(s.get('paid')), 'shipped': bool(s.get('shipped')),
                 'address': lookup_address(o['user'], o.get('zip')),
                 'slips': slips.get(k, []),
+                'acts': {f: {'by': v[0], 'at': v[1], 'via': v[2]} for f, v in acts.get(k, {}).items()},
             })
     active = [o for o in orders if not o['cancelled']]
     prep = {}
@@ -237,7 +256,7 @@ def round_view(rid):
         q['answeredAt'] = a['at'] if a else None
     return {
         'id': rid, 'title': d.get('title'), 'status': status, 'syncedStatus': d.get('status'),
-        'statusSetBy': override,
+        'statusSetBy': override, 'lastScan': last_scan,
         'deliveryDateLabel': d.get('deliveryDateLabel'), 'deliveryDateFull': d.get('deliveryDateFull'),
         'popupTitle': d.get('popupTitle'), 'payment': d.get('payment', {}),
         'menu': d.get('menu', []), 'displayColumns': d.get('displayColumns') or [m['code'] for m in d.get('menu', [])],
@@ -268,7 +287,8 @@ def rounds_list():
         if v is None:
             continue
         out.append({'id': r['id'], 'title': r.get('title'), 'status': v['status'],
-                    'deliveryDateLabel': r.get('deliveryDateLabel'), 'summary': v['summary']})
+                    'deliveryDateLabel': r.get('deliveryDateLabel'), 'summary': v['summary'],
+                    'lastScan': v['lastScan']})
     return out
 
 
@@ -319,6 +339,134 @@ def customer(handle):
     hist.sort(key=lambda x: x['round'], reverse=True)
     addrs = [dict(v, postal=k) for k, v in addrbook().get('byUser', {}).get(h, {}).items()]
     return {'handle': h, 'history': hist, 'addresses': addrs}
+
+
+VENDOR = 'lee_ancharlee'   # her own comments log DM customers' orders: one handle, many people
+TH = datetime.timezone(datetime.timedelta(hours=7))   # the board runs in UTC; days are Bangkok days
+WEEKDAYS = ['จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์', 'อาทิตย์']
+
+
+def be_date(s):
+    """'2569-10-08' (Buddhist era) -> datetime.date(2026, 10, 8)."""
+    try:
+        y, m, d = (int(x) for x in str(s)[:10].split('-'))
+        return datetime.date(y - 543 if y > 2400 else y, m, d)
+    except ValueError:
+        return None
+
+
+def analytics(rng):
+    today = datetime.datetime.now(TH).date()
+    since = today - datetime.timedelta(days=int(rng)) if str(rng).isdigit() else None
+    rounds, months, dishes, cust, zones, zips, wk = [], {}, {}, {}, {}, {}, {}
+    seen = set()
+    entries = []
+    first_paid, tracked = {}, set()
+    with db() as c:
+        for e in c.execute("SELECT round_id, okey, at, kind, payload FROM events WHERE kind IN ('status','slip') ORDER BY id"):
+            tracked.add(e['round_id'])
+            pl = json.loads(e['payload']) if e['payload'] else {}
+            if e['kind'] == 'slip' or pl.get('paid'):
+                first_paid.setdefault((e['round_id'], e['okey']), e['at'])
+    allc = {}           # every customer over ALL rounds (lapsed regulars ignore the range filter)
+    delays = []         # days between delivery day and the first paid tick/slip (negative = paid before)
+    unpaid_after = []   # delivered (or shipped) but not paid, in tracked rounds
+    for r in index().get('orders', []):
+        d = round_data(r['id'])
+        if d:
+            entries.append((be_date(d.get('deliveryDate') or r['id']), r, d))
+    entries.sort(key=lambda x: (x[0] or datetime.date.min, x[1]['id']))
+    for day, r, d in entries:
+        v = round_view(r['id'])
+        if v['status'] == 'cancelled':
+            continue
+        act = [o for o in v['orders'] if not o['cancelled']]
+        names = {m['code']: m.get('short') or m.get('name') for m in d.get('menu', [])}
+        pr = prices(d)
+        new = 0
+        handles = set()
+        for o in act:
+            h = norm_u(o['user'])
+            handles.add(h)
+            g = allc.setdefault(h, {'handle': h, 'rounds': set(), 'food': 0, 'last': None, 'lastLabel': ''})
+            g['rounds'].add(r['id']); g['food'] += o['food']
+            if day and (g['last'] is None or day >= g['last']):
+                g['last'], g['lastLabel'] = day, (r.get('deliveryDateLabel') or '').split(' → ')[0]
+            if r['id'] in tracked:
+                pa = first_paid.get((r['id'], o['key']))
+                if pa and day:
+                    delays.append((datetime.datetime.fromtimestamp(pa, TH).date() - day).days)
+                if not o['paid'] and (v['status'] == 'delivered' or o['shipped']):
+                    unpaid_after.append({'handle': h, 'round': r['id'], 'label': (r.get('deliveryDateLabel') or '').split(' → ')[0],
+                                         'total': o['total'], 'shipped': o['shipped']})
+            if h not in seen:
+                new += 1 if h != VENDOR else 0
+        in_range = not since or (day and day >= since)
+        seen |= handles
+        if not in_range:
+            continue
+        food, fees = sum(o['food'] for o in act), sum(o['fee'] for o in act)
+        rounds.append({'id': r['id'], 'label': (r.get('deliveryDateLabel') or '').split(' → ')[0],
+                       'date': day.isoformat() if day else None, 'status': v['status'],
+                       'orders': len(act), 'food': food, 'fees': fees, 'customers': len(handles - {VENDOR}),
+                       'new': new, 'paidAmt': v['summary']['paidAmt'], 'dueAmt': v['summary']['dueAmt'],
+                       'title': d.get('title', '')})
+        mk = day.strftime('%Y-%m') if day else '?'
+        m = months.setdefault(mk, {'month': mk, 'rounds': 0, 'orders': 0, 'food': 0})
+        m['rounds'] += 1; m['orders'] += len(act); m['food'] += food
+        if day:
+            w = wk.setdefault(day.weekday(), {'day': WEEKDAYS[day.weekday()], 'idx': day.weekday(), 'rounds': 0, 'orders': 0, 'food': 0})
+            w['rounds'] += 1; w['orders'] += len(act); w['food'] += food
+        for o in act:
+            for k, q in o['items'].items():
+                if not q:
+                    continue
+                n = names.get(k, k)
+                x = dishes.setdefault(n, {'name': n, 'qty': 0, 'food': 0, 'rounds': set()})
+                x['qty'] += q; x['food'] += q * pr.get(k, 0); x['rounds'].add(r['id'])
+            h = norm_u(o['user'])
+            c = cust.setdefault(h, {'handle': h, 'orders': 0, 'food': 0, 'rounds': set()})
+            c['orders'] += 1; c['food'] += o['food']; c['rounds'].add(r['id'])
+            z = o['zone'] if o['zone'] in ('กทม./ปริมณฑล', 'ต่างจังหวัด', 'มารับเอง') else 'ไม่ระบุ ปณ.'
+            zones[z] = zones.get(z, 0) + 1
+            if o['zip']:
+                zips[o['zip']] = zips.get(o['zip'], 0) + 1
+    people = [c for c in cust.values() if c['handle'] != VENDOR]
+    buckets = {'1 รอบ': 0, '2–3 รอบ': 0, '4–9 รอบ': 0, '10+ รอบ': 0}
+    for c in people:
+        n = len(c['rounds'])
+        buckets['1 รอบ' if n == 1 else '2–3 รอบ' if n <= 3 else '4–9 รอบ' if n <= 9 else '10+ รอบ'] += 1
+    for x in list(dishes.values()) + list(cust.values()):
+        x['rounds'] = len(x['rounds'])
+    lapsed = [dict(g, rounds=len(g['rounds']), last=g['last'].isoformat(), days=(today - g['last']).days)
+              for g in allc.values() if g['handle'] != VENDOR and g['last'] and len(g['rounds']) >= 3
+              and (today - g['last']).days >= 30]
+    delays.sort()
+    pay = {'tracked': len(tracked), 'paid': len(delays),
+           'median': delays[len(delays) // 2] if delays else None,
+           'beforeDelivery': sum(1 for x in delays if x <= 0),
+           'unpaidAfter': sorted(unpaid_after, key=lambda u: -u['total']),
+           'unpaidAfterAmt': sum(u['total'] for u in unpaid_after)}
+    tot_food = sum(r['food'] for r in rounds)
+    tot_orders = sum(r['orders'] for r in rounds)
+    return {
+        'range': rng, 'since': since.isoformat() if since else None,
+        'totals': {'rounds': len(rounds), 'orders': tot_orders, 'food': tot_food,
+                   'fees': sum(r['fees'] for r in rounds), 'customers': len(people),
+                   'repeat': sum(1 for c in people if c['rounds'] > 1),
+                   'avgOrder': round(tot_food / tot_orders) if tot_orders else 0,
+                   'avgRound': round(tot_food / len(rounds)) if rounds else 0},
+        'rounds': rounds, 'months': sorted(months.values(), key=lambda m: m['month']),
+        'weekdays': sorted(wk.values(), key=lambda w: w['idx']),
+        'dishes': sorted(dishes.values(), key=lambda x: -x['food'])[:20],
+        'topCustomers': sorted(people, key=lambda c: -c['food'])[:15],
+        'vendor': cust.get(VENDOR),
+        'loyalty': [{'label': k, 'n': v} for k, v in buckets.items()],
+        'zones': sorted(({'zone': k, 'n': v} for k, v in zones.items()), key=lambda z: -z['n']),
+        'zips': sorted(({'zip': k, 'n': v} for k, v in zips.items()), key=lambda z: -z['n'])[:12],
+        'lapsed': sorted(lapsed, key=lambda g: (-g['rounds'], g['days']))[:25],
+        'payments': pay,
+    }
 
 
 def shipping_csv(rid):
@@ -382,6 +530,21 @@ class H(BaseHTTPRequestHandler):
                     return self.send(404, {'error': 'no such round'})
                 return self.send(200, shipping_csv(m.group(1)), 'text/csv; charset=utf-8',
                                  {'Content-Disposition': 'attachment; filename="shipping-%s.csv"' % m.group(1)})
+            m = re.fullmatch(r'/api/round/([^/]+)/history', path)
+            if m:
+                if round_data(m.group(1)) is None:
+                    return self.send(404, {'error': 'no such round'})
+                with db() as c:
+                    rows = [dict(r) for r in c.execute(
+                        'SELECT * FROM events WHERE round_id=? ORDER BY id DESC LIMIT 1000', (m.group(1),))]
+                for r in rows:
+                    r['payload'] = json.loads(r['payload']) if r['payload'] else None
+                return self.send(200, rows)
+            if path == '/api/analytics':
+                rng = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('range') or ['all'])[0]
+                return self.send(200, analytics(rng if rng in ('all', '90', '365', '30') else 'all'))
+            if path == '/api/system':
+                return self.send(200, system_info())
             m = re.fullmatch(r'/api/round/([^/]+)', path)
             if m:
                 v = round_view(m.group(1))
@@ -489,9 +652,8 @@ class H(BaseHTTPRequestHandler):
                     if 'admins' not in me['groups']:
                         return self.send(403, {'error': 'admins only'})
                     reply = str(b.get('reply', '')).strip()[:4000] or None
-                    c.execute('UPDATE notes SET done=1, done_by=?, done_at=?, reply=? WHERE id=?',
-                              (by, int(time.time()), reply, int(m.group(1))))
-                    log_event(c, by, 'note_done', None, None, m.group(1), {'reply': reply})
+                    if not note_done(c, int(m.group(1)), by, reply):
+                        return self.send(404, {'error': 'no such note'})
                     return self.send(200, {'ok': True})
             return self.send(404, {'error': 'not found'})
         except Exception as e:
@@ -531,9 +693,30 @@ class H(BaseHTTPRequestHandler):
         return self.send(200, {'ok': True, 'id': cur.lastrowid})
 
 
-def inbox(since):
+def note_done(c, nid, by, reply):
+    n = c.execute('SELECT * FROM notes WHERE id=?', (nid,)).fetchone()
+    if not n:
+        return False
+    c.execute('UPDATE notes SET done=1, done_by=?, done_at=?, reply=? WHERE id=?', (by, int(time.time()), reply, nid))
+    log_event(c, by, 'note_done', n['round_id'], n['okey'], str(nid), {'reply': reply, 'text': n['text'][:200]})
+    return True
+
+
+def system_info():
+    with db() as c:
+        def last(kind, where='', args=()):
+            r = c.execute('SELECT by, at, round_id, payload FROM events WHERE kind=? %s ORDER BY id DESC LIMIT 1' % where,
+                          (kind,) + args).fetchone()
+            return dict(r, payload=json.loads(r['payload'] or 'null')) if r else None
+        return {'lastUpdateRounds': last('sync', "AND payload LIKE '%update rounds%'"),
+                'lastSync': last('sync'), 'lastScan': last('scan'), 'lastInboxRead': last('inbox_read')}
+
+
+def inbox(since, mark=False):
     sys.stdout.reconfigure(encoding='utf-8')
     with db() as c:
+        if mark:
+            log_event(c, SYSTEM_USER, 'inbox_read')
         ev = [dict(r) for r in c.execute('SELECT * FROM events WHERE at>? ORDER BY id', (since,))]
         open_notes = [dict(r) for r in c.execute('SELECT * FROM notes WHERE done=0 ORDER BY id')]
     for e in ev:
@@ -543,8 +726,27 @@ def inbox(since):
 
 if __name__ == '__main__':
     init_db()
-    if len(sys.argv) > 1 and sys.argv[1] == 'inbox':
-        inbox(int(sys.argv[2]) if len(sys.argv) > 2 else 0)
+    argv = [a for a in sys.argv[1:] if a != '--mark']
+    if argv and argv[0] == 'inbox':
+        inbox(int(argv[1]) if len(argv) > 1 else 0, '--mark' in sys.argv)
+        sys.exit(0)
+    if argv and argv[0] == 'log':          # log <kind> <round|-> [json] [--at epoch]
+        at = None
+        if '--at' in argv:
+            i = argv.index('--at')
+            at = int(argv[i + 1])
+            del argv[i:i + 2]
+        with db() as c:
+            log_event(c, SYSTEM_USER, argv[1], None if argv[2] == '-' else argv[2], None, None,
+                      json.loads(argv[3]) if len(argv) > 3 else None)
+            if at:
+                c.execute('UPDATE events SET at=? WHERE id=(SELECT MAX(id) FROM events)', (at,))
+        print('logged')
+        sys.exit(0)
+    if argv and argv[0] == 'note-done':    # note-done <id> [reply]
+        with db() as c:
+            ok = note_done(c, int(argv[1]), SYSTEM_USER, argv[2] if len(argv) > 2 else None)
+        print('done' if ok else 'no such note')
         sys.exit(0)
     port = int(os.environ.get('PORT', '8080'))
     print('leeorders on :%d, data %s' % (port, DATA), flush=True)

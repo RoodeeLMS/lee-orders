@@ -37,6 +37,14 @@ const whenIso = (iso) => iso ? new Date(iso).toLocaleString('th-TH', { day: 'num
 const STATUS_LABEL = { open: 'เปิดรับออเดอร์', closed: 'ปิดรับแล้ว', delivered: 'ส่งแล้ว', cancelled: 'ยกเลิกรอบ' };
 const statusPill = (s) => `<span class="pill ${esc(s)}">${STATUS_LABEL[s] || esc(s)}</span>`;
 const pending = (s) => s === 'open' || s === 'closed';   // not delivered yet
+// Login name -> who it is. 'claude' is the automated side (scans, syncs, applying answers), never a person.
+const SYSTEM_USER = 'claude';
+const NAMES = { lee: 'คุณหลี', nick: 'Nick', [SYSTEM_USER]: '🤖 ระบบ' };
+const whoName = (u) => NAMES[u] || u || '?';
+const whoHtml = (u) => `<span class="who-tag ${u === SYSTEM_USER ? 'bot' : ''}">${esc(whoName(u))}</span>`;
+let SYS = {};   // /api/system: when the system last read comments, synced, read Lee's replies
+const seenBySystem = (at) => SYS.lastInboxRead && at && SYS.lastInboxRead.at >= at;
+const scanLine = (sc) => sc ? `🤖 ระบบอ่านคอมเมนต์ล่าสุด ${when(sc.at)}${sc.payload && sc.payload.comments ? ` · ${sc.payload.comments} คอมเมนต์` : ''}${sc.payload && sc.payload.last ? ` · คนล่าสุด @${esc(sc.payload.last)}` : ''}` : '';
 // "ครัวคุณหลี · รอบจัดส่งพฤหัสบดี 8/10/2569 (Cold Pasta + …) — x" -> "Cold Pasta + … — x"
 const shortTitle = (t) => String(t || '').replace(/^ครัวคุณหลี · /, '').replace(/^รอบ(จัด)?ส่ง\S*\s*\d+\/\d+\/\d+\s*/, '')
   .replace(/^\((.*?)\)/, '$1');
@@ -48,13 +56,16 @@ async function route() {
   document.querySelectorAll('header nav a').forEach((a) => a.classList.toggle('on',
     (a.dataset.nav === 'rounds' && (parts[0] === undefined || parts[0] === 'r')) ||
     (a.dataset.nav === 'customers' && (parts[0] === 'customers' || parts[0] === 'c')) ||
-    (a.dataset.nav === 'notes' && parts[0] === 'notes')));
+    (a.dataset.nav === 'notes' && parts[0] === 'notes') ||
+    (a.dataset.nav === 'stats' && parts[0] === 'stats')));
   try {
+    SYS = await api('/api/system').catch(() => ({}));
     if (!parts.length) return await viewRounds();
     if (parts[0] === 'r') return await viewRound(parts[1], parts[2] || 'orders');
     if (parts[0] === 'customers') return await viewCustomers();
     if (parts[0] === 'c') return await viewCustomer(parts[1]);
     if (parts[0] === 'notes') return await viewNotes();
+    if (parts[0] === 'stats') return await viewStats();
     $app.innerHTML = '<p class="empty">ไม่พบหน้านี้</p>';
   } catch (e) {
     $app.innerHTML = `<p class="empty">โหลดไม่สำเร็จ: ${esc(e.message)}</p>`;
@@ -80,12 +91,17 @@ async function viewRounds() {
       }
       if (s.openNotes) chips.push(`<span class="pill warn">📝 ${s.openNotes}</span>`);
       line = `<div class="row" style="margin-top:4px"><b>${s.orders} ออเดอร์ · ${baht(s.food)}</b>${chips.join('')}</div>`;
+      if (pending(r.status) && r.lastScan) line += `<div class="fresh">${scanLine(r.lastScan)}</div>`;
     }
     return `<a class="card" href="#/r/${encodeURIComponent(r.id)}">
       <div class="head"><b style="font-size:17px">${esc((r.deliveryDateLabel || r.id).split(' → ')[0])}</b>${statusPill(r.status)}</div>
       <div class="sub">${esc(shortTitle(r.title))}</div>${line}</a>`;
   };
   $app.innerHTML = `
+    <div class="sysbar">
+      <div>🤖 ระบบอัปเดตรอบล่าสุด: <b>${SYS.lastUpdateRounds ? when(SYS.lastUpdateRounds.at) : '—'}</b></div>
+      <div>🤖 ระบบอ่านคำตอบ/ข้อความของคุณหลีล่าสุด: <b>${SYS.lastInboxRead ? when(SYS.lastInboxRead.at) : '—'}</b></div>
+    </div>
     <h1>รอบที่ยังไม่ส่ง</h1>
     <div class="grid">${open.map(card).join('') || '<p class="empty">ไม่มีรอบที่ค้างอยู่</p>'}</div>
     <h2>รอบก่อนหน้า</h2>
@@ -161,7 +177,7 @@ async function viewRound(id, tab) {
   R = await api('/api/round/' + encodeURIComponent(id));
   const s = R.summary;
   const tabs = [['orders', '📋', 'ออเดอร์'], ['questions', '❓', 'คำถาม', s.openQuestions], ['prep', '🍳', 'เตรียม'],
-    ['ship', '🚚', 'ส่งของ'], ['notes', '📝', 'โน้ต', s.openNotes]];
+    ['ship', '🚚', 'ส่งของ'], ['notes', '📝', 'โน้ต', s.openNotes], ['history', '🕘', 'ประวัติ']];
   $app.innerHTML = `
     <div class="rhead"><div style="flex:1 1 auto;min-width:0">
       <h1>${esc((R.deliveryDateLabel || R.id).split(' → ')[0])}</h1>
@@ -174,8 +190,8 @@ async function viewRound(id, tab) {
       <div class="stat"><b>${s.shipped}/${s.orders}</b><span>ส่งแล้ว</span></div>
     </div>
     <div class="sub">${s.orders} ออเดอร์${s.cancelled ? ` (+${s.cancelled} ยกเลิก)` : ''} · อาหาร ${baht(s.food)} · ค่าส่ง ${baht(s.fees)} · <span id="slipCount">สลิป ${s.slips}</span></div>
-    ${R.parsedAt ? `<p class="fresh">ข้อมูลออเดอร์อัปเดต ${esc(whenIso(R.parsedAt))}</p>` : ''}
-    <details class="rstat noprint"><summary>⚙️ สถานะรอบ: <b>${STATUS_LABEL[R.status] || esc(R.status)}</b>${R.statusSetBy ? ` <span class="sub">(ตั้งโดย ${esc(R.statusSetBy.by)} ${when(R.statusSetBy.at)})</span>` : ''} ▸</summary>
+    <p class="fresh">${R.lastScan ? scanLine(R.lastScan) : R.parsedAt ? `ข้อมูลออเดอร์อัปเดต ${esc(whenIso(R.parsedAt))}` : ''}</p>
+    <details class="rstat noprint"><summary>⚙️ สถานะรอบ: <b>${STATUS_LABEL[R.status] || esc(R.status)}</b>${R.statusSetBy ? ` <span class="sub">(ตั้งโดย ${esc(whoName(R.statusSetBy.by))} ${when(R.statusSetBy.at)})</span>` : ''} ▸</summary>
       <div class="chips" style="margin:8px 0">${Object.keys(STATUS_LABEL).map((k) => `<button data-rs="${k}" class="${R.status === k ? 'on' : ''}">${STATUS_LABEL[k]}</button>`).join('')}</div>
       <div class="sub">ปิดรับแล้ว = ไม่รับออเดอร์เพิ่ม · ส่งแล้ว = ย้ายไปรอบก่อนหน้า · แตะ 2 ครั้งเพื่อยืนยัน</div>
     </details>
@@ -194,7 +210,7 @@ async function viewRound(id, tab) {
       toast('เปลี่ยนสถานะรอบแล้ว ✓'); viewRound(R.id, tab);
     } catch (e) { toast('ไม่สำเร็จ: ' + e.message); }
   };
-  ({ orders: tabOrders, questions: tabQuestions, prep: tabPrep, ship: tabShip, notes: tabNotes }[tab] || tabOrders)();
+  ({ orders: tabOrders, questions: tabQuestions, prep: tabPrep, ship: tabShip, notes: tabNotes, history: tabHistory }[tab] || tabOrders)();
 }
 
 function sorted(list) {
@@ -241,6 +257,15 @@ function tabOrders() {
   draw();
 }
 
+function actLine(o) {
+  const a = o.acts || {}, bits = [];
+  if (o.paid && a.paid) bits.push(`จ่าย · ${whoHtml(a.paid.by)} ${when(a.paid.at)}${a.paid.via === 'slip' ? ' (แนบสลิป)' : ''}`);
+  if (o.shipped && a.shipped) bits.push(`ส่ง · ${whoHtml(a.shipped.by)} ${when(a.shipped.at)}`);
+  if (a.fee && o.fee !== o.feeAuto) bits.push(`ค่าส่ง ${fmt(o.fee)} · ${whoHtml(a.fee.by)} ${when(a.fee.at)}`);
+  return bits.length ? `<div class="actline">✓ ${bits.join(' &nbsp;·&nbsp; ')}</div>` : '';
+}
+const stamp = (o, f, via) => { o.acts = o.acts || {}; o.acts[f] = { by: ME.user, at: Date.now() / 1000, via: via || null }; };
+
 function orderCard(o) {
   const k = esc(o.key);
   const hint = hintOf(o.user);
@@ -258,6 +283,7 @@ function orderCard(o) {
       <button data-act="paid" class="${o.paid ? 'on' : ''}">${o.paid ? '☑ จ่ายแล้ว' : '☐ จ่ายแล้ว'}</button>
       <button data-act="shipped" class="${o.shipped ? 'on' : ''}">${o.shipped ? '☑ ส่งแล้ว' : '☐ ส่งแล้ว'}</button>
     </div>
+    ${actLine(o)}
     <div class="sliprow noprint">
       ${o.slips.map((s) => `<img class="slipthumb" src="/api/slip/${s.id}" data-slip="${s.id}" loading="lazy" alt="สลิป">`).join('')}
       <button data-act="slip" class="${o.paid ? '' : 'slipbtn'}">📎 ${o.slips.length ? 'เพิ่มสลิป' : 'แนบสลิป'}</button>
@@ -316,7 +342,7 @@ async function uploadSlip(o, file) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
   o.slips.push({ id: j.id, by: ME.user, at: Date.now() / 1000 });
-  o.paid = true;
+  o.paid = true; stamp(o, 'paid', 'slip');
   R.summary.slips = R.orders.filter((x) => !x.cancelled && x.slips.length).length;
   const sc = document.getElementById('slipCount');
   if (sc) sc.textContent = `สลิป ${R.summary.slips}`;
@@ -326,7 +352,8 @@ async function uploadSlip(o, file) {
 function openSlip(o, id) {
   const ov = document.createElement('div');
   ov.className = 'viewer';
-  ov.innerHTML = `<div class="vbar"><div><b>@${esc(handleOf(o.user))}</b><div class="sub">ยอดที่ต้องจ่าย ${baht(o.food + o.fee)}</div></div>
+  const sl = o.slips.find((x) => x.id === id) || {};
+  ov.innerHTML = `<div class="vbar"><div><b>@${esc(handleOf(o.user))}</b><div class="sub">ยอดที่ต้องจ่าย ${baht(o.food + o.fee)} · แนบโดย ${esc(whoName(sl.by))} ${when(sl.at)}</div></div>
       <span class="spacer"></span><button data-x>✕ ปิด</button></div>
     <img src="/api/slip/${id}" alt="สลิป">
     <div class="vbar"><span class="spacer"></span><button data-del>🗑 ลบสลิปนี้</button></div>`;
@@ -372,7 +399,7 @@ async function onOrderClick(ev) {
       const v = !o[act];
       b.disabled = true;
       await api('/api/status', { round: R.id, key: o.key, [act]: v });
-      o[act] = v; toast(v ? (act === 'paid' ? 'บันทึก จ่ายแล้ว ✓' : 'บันทึก ส่งแล้ว ✓') : 'เอาเครื่องหมายออกแล้ว');
+      o[act] = v; stamp(o, act); toast(v ? (act === 'paid' ? 'บันทึก จ่ายแล้ว ✓' : 'บันทึก ส่งแล้ว ✓') : 'เอาเครื่องหมายออกแล้ว');
       return redraw(card, o);
     }
     if (act === 'copymsg') return copy(customerMessage(o), 'คัดลอกสรุปยอดแล้ว ✓');
@@ -381,7 +408,7 @@ async function onOrderClick(ev) {
     if (act === 'fee') {
       const v = card.querySelector('[data-fee]').value;
       await api('/api/status', { round: R.id, key: o.key, fee: v === '' ? null : Number(v) });
-      o.fee = v === '' ? o.feeAuto : Number(v); toast('บันทึกค่าส่งแล้ว ✓');
+      o.fee = v === '' ? o.feeAuto : Number(v); stamp(o, 'fee'); toast('บันทึกค่าส่งแล้ว ✓');
       return redraw(card, o, true);
     }
     if (act === 'note') {
@@ -418,7 +445,8 @@ function tabQuestions() {
   const card = (q) => `<div class="card q ${q.answer ? 'done' : ''}" data-qid="${esc(q.id)}">
     <div class="qtext">${esc(q.text)}</div>${ctx(q)}
     ${q.options && q.options.length ? `<div class="opts">${q.options.map((op) => `<button data-opt="${esc(op)}" class="${q.answer === op ? 'on' : ''}">${esc(op)}</button>`).join('')}</div>` : ''}
-    ${q.answer ? `<div class="ans">✓ ${esc(q.answer)} <span class="sub">· ${esc(q.answeredBy || '')} ${when(q.answeredAt)}</span></div>` : ''}
+    ${q.answer ? `<div class="ans">✓ ${esc(q.answer)} <span class="sub">· ${esc(whoName(q.answeredBy))} ${when(q.answeredAt)}</span></div>
+      <div class="sub">${seenBySystem(q.answeredAt) ? `🤖 ระบบรับคำตอบแล้ว ${when(SYS.lastInboxRead.at)}` : '⏳ ระบบยังไม่ได้อ่านคำตอบนี้'}</div>` : ''}
     <div class="row" style="margin-top:8px"><input type="text" placeholder="${q.options && q.options.length ? 'หรือพิมพ์คำตอบเอง' : 'พิมพ์คำตอบ'}" value="${esc(q.answer && !(q.options || []).includes(q.answer) ? q.answer : '')}" data-free style="flex:1 1 180px">
       <button class="primary" data-send>ส่ง</button></div>
   </div>`;
@@ -492,11 +520,46 @@ function tabShip() {
   };
 }
 
+function eventText(e) {
+  const p = e.payload || {};
+  const who = e.okey ? `@${esc(handleOf(e.okey.replace(/^cap:/, '')))}${e.okey.startsWith('cap:') ? ' (แคปชั่น)' : ''}` : '';
+  switch (e.kind) {
+    case 'status': return [p.paid !== undefined && (p.paid ? `ติ๊ก จ่ายแล้ว ${who}` : `เอา จ่ายแล้ว ออก ${who}`),
+      p.shipped !== undefined && (p.shipped ? `ติ๊ก ส่งแล้ว ${who}` : `เอา ส่งแล้ว ออก ${who}`),
+      p.fee !== undefined && (p.fee === null ? `คืนค่าส่งเป็นค่าปกติ ${who}` : `ตั้งค่าส่ง ${fmt(p.fee)} บาท ${who}`)].filter(Boolean).join(' · ');
+    case 'slip': return `แนบสลิป ${who} (ติ๊กจ่ายแล้ว)`;
+    case 'slip_removed': return `ลบสลิป ${who}`;
+    case 'answer': return `ตอบคำถาม: ${esc(p.question || '')} → <b>${esc(p.answer || '')}</b>`;
+    case 'note': return `ฝากโน้ต${who ? ' ' + who : ''}: ${esc(p.text || '')}`;
+    case 'note_done': return `จัดการโน้ตแล้ว${p.text ? ': ' + esc(p.text) : ''}${p.reply ? ` — ตอบ: ${esc(p.reply)}` : ''}`;
+    case 'round_status': return `เปลี่ยนสถานะรอบ ${esc(STATUS_LABEL[p.from] || p.from || '-')} → <b>${esc(STATUS_LABEL[p.to] || p.to)}</b>`;
+    case 'scan': return `อ่านคอมเมนต์${p.comments ? ` ${p.comments} รายการ` : ''}${p.orders ? ` · ${p.orders} ออเดอร์` : ''}${p.last ? ` · คนล่าสุด @${esc(p.last)}` : ''}${p.reason ? ` (${esc(p.reason)})` : ''}`;
+    case 'sync': return `อัปเดตข้อมูลรอบในแอป${p.reason ? ` (${esc(p.reason)})` : ''}`;
+    default: return esc(e.kind);
+  }
+}
+
+async function tabHistory() {
+  const el = document.getElementById('tab');
+  el.innerHTML = '<p class="muted">กำลังโหลด…</p>';
+  const rows = await api(`/api/round/${encodeURIComponent(R.id)}/history`);
+  const sysOnly = store.get('lee.histFilter', 'all');
+  const list = rows.filter((e) => sysOnly === 'all' || (sysOnly === 'bot' ? e.by === SYSTEM_USER : e.by !== SYSTEM_USER));
+  el.innerHTML = `
+    <div class="chips noprint" style="margin-bottom:8px">
+      ${[['all', 'ทั้งหมด'], ['people', 'คน (คุณหลี / Nick)'], ['bot', '🤖 ระบบ']].map(([k, l]) => `<button data-hf="${k}" class="${sysOnly === k ? 'on' : ''}">${l}</button>`).join('')}
+    </div>
+    ${list.length ? `<div class="hist">${list.map((e) => `<div class="hrow ${e.by === SYSTEM_USER ? 'bot' : ''}">
+      <div class="hwhen">${when(e.at)}</div><div>${whoHtml(e.by)} ${eventText(e)}</div></div>`).join('')}</div>`
+      : '<p class="empty">ยังไม่มีประวัติในรอบนี้</p>'}`;
+  el.querySelectorAll('[data-hf]').forEach((b) => b.onclick = () => { store.set('lee.histFilter', b.dataset.hf); tabHistory(); });
+}
+
 function noteCard(n) {
   return `<div class="card note ${n.done ? 'done' : ''}" data-id="${n.id}">
-    <div class="meta">${esc(n.by)} · ${when(n.at)}${n.okey ? ` · ออเดอร์ @${esc(handleOf(n.okey.replace(/^cap:/, '')))}` : ''}${n.round_id && !R ? ` · <a href="#/r/${encodeURIComponent(n.round_id)}/notes">รอบนี้ ›</a>` : ''} ${n.done ? '· ✓ จัดการแล้ว' : '· ⏳ รอจัดการ'}</div>
+    <div class="meta">${whoHtml(n.by)} · ${when(n.at)}${n.okey ? ` · ออเดอร์ @${esc(handleOf(n.okey.replace(/^cap:/, '')))}` : ''}${n.round_id && !R ? ` · <a href="#/r/${encodeURIComponent(n.round_id)}/notes">รอบนี้ ›</a>` : ''} ${n.done ? '· ✓ จัดการแล้ว' : seenBySystem(n.at) ? '· 🤖 ระบบอ่านแล้ว รอจัดการ' : '· ⏳ รอระบบอ่าน'}</div>
     <div style="white-space:pre-wrap;margin-top:4px">${esc(n.text)}</div>
-    ${n.reply ? `<div class="reply">↳ ${esc(n.reply)} <span class="sub">(${esc(n.done_by || '')} ${when(n.done_at)})</span></div>` : ''}
+    ${n.reply ? `<div class="reply">↳ ${esc(n.reply)} <span class="sub">(${esc(whoName(n.done_by))} ${when(n.done_at)})</span></div>` : ''}
     ${isAdmin() && !n.done ? `<div class="row noprint" style="margin-top:8px"><input type="text" placeholder="ตอบกลับ (ไม่บังคับ)" data-reply style="flex:1 1 160px"><button data-done>✓ จัดการแล้ว</button></div>` : ''}
   </div>`;
 }
@@ -589,6 +652,84 @@ async function viewNotes() {
     catch (e) { toast('ไม่สำเร็จ: ' + e.message); }
   };
   bindNoteDone($app, viewNotes);
+}
+
+/* ----------------------------------------------------------------- stats */
+const TH_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+const monthTh = (ym) => { const [y, m] = ym.split('-').map(Number); return `${TH_MONTHS[m - 1]} ${String(y + 543).slice(2)}`; };
+const kfmt = (n) => n >= 1e6 ? '฿' + (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? '฿' + Math.round(n / 1e3) + 'k' : baht(n);
+
+// One horizontal bar row: label | bar | value. `max` scales every row in the same chart.
+function barRow(label, v, max, value, sub, href, cls = '') {
+  const w = max ? Math.max(2, Math.round((v / max) * 100)) : 0;
+  const inner = `<div class="blabel">${label}${sub ? `<div class="bsub">${sub}</div>` : ''}</div>
+    <div class="btrack"><div class="bfill ${cls}" style="width:${w}%"></div></div><div class="bval">${value}</div>`;
+  return href ? `<a class="brow" href="${href}">${inner}</a>` : `<div class="brow">${inner}</div>`;
+}
+
+async function viewStats() {
+  R = null;
+  const rng = store.get('lee.statsRange', 'all');
+  $app.innerHTML = '<p class="muted">กำลังคำนวณ…</p>';
+  const a = await api('/api/analytics?range=' + rng);
+  const t = a.totals;
+  const mx = (arr, f) => Math.max(0, ...arr.map(f));
+  const recent = a.rounds.slice(-20).reverse();
+  const pend = a.rounds.filter((r) => pending(r.status));
+  const kpi = (v, l) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`;
+  $app.innerHTML = `
+    <div class="head"><h1>สถิติ</h1></div>
+    <div class="chips noprint" style="margin:6px 0 4px">
+      ${[['30', '30 วัน'], ['90', '3 เดือน'], ['365', '1 ปี'], ['all', 'ทั้งหมด']].map(([k, l]) => `<button data-rg="${k}" class="${rng === k ? 'on' : ''}">${l}</button>`).join('')}
+    </div>
+    <div class="sub">${t.rounds} รอบ${a.since ? ` ตั้งแต่ ${esc(a.since)}` : ''} · ไม่นับออเดอร์/รอบที่ยกเลิก · ยอด = ค่าอาหาร (ไม่รวมค่าส่ง)</div>
+    <div class="stats kpis">
+      ${kpi(kfmt(t.food), 'ยอดขายอาหาร')}${kpi(fmt(t.orders), 'ออเดอร์')}${kpi(fmt(t.customers), 'ลูกค้า')}
+      ${kpi(t.customers ? Math.round((t.repeat / t.customers) * 100) + '%' : '-', `ซื้อซ้ำ (${fmt(t.repeat)} คน)`)}
+      ${kpi(baht(t.avgOrder), 'เฉลี่ย/ออเดอร์')}${kpi(kfmt(t.avgRound), 'เฉลี่ย/รอบ')}
+      ${kpi(kfmt(t.fees), 'ค่าส่งรวม')}${kpi(fmt(t.rounds), 'รอบ')}
+    </div>
+    <div class="grid stats-grid">
+      ${pend.length ? `<div class="card"><h3>💰 การเก็บเงินรอบที่ยังไม่ส่ง</h3>
+        ${pend.map((r) => barRow(esc(r.label), r.paidAmt, r.paidAmt + r.dueAmt, `${Math.round(100 * r.paidAmt / ((r.paidAmt + r.dueAmt) || 1))}%`,
+          `เก็บแล้ว ${baht(r.paidAmt)} · ค้าง ${baht(r.dueAmt)}`, `#/r/${encodeURIComponent(r.id)}`, 'ok')).join('')}</div>` : ''}
+      <div class="card"><h3>💳 การจ่ายเงิน</h3>
+        ${a.payments.tracked ? `
+        <div class="row" style="gap:16px;margin-bottom:6px">
+          <div><b style="font-size:18px">${a.payments.median === null ? '-' : a.payments.median === 0 ? 'วันส่ง' : a.payments.median < 0 ? `ก่อนส่ง ${-a.payments.median} วัน` : `หลังส่ง ${a.payments.median} วัน`}</b><div class="sub">จ่ายเร็วแค่ไหน (ค่ากลาง)</div></div>
+          <div><b style="font-size:18px">${a.payments.paid ? Math.round(100 * a.payments.beforeDelivery / a.payments.paid) + '%' : '-'}</b><div class="sub">จ่ายก่อน/ในวันส่ง</div></div>
+        </div>
+        ${a.payments.unpaidAfter.length ? `<div class="sub" style="margin:6px 0">ส่งของแล้วแต่ยังไม่จ่าย ${a.payments.unpaidAfter.length} ราย · ${baht(a.payments.unpaidAfterAmt)}</div>
+          ${a.payments.unpaidAfter.slice(0, 15).map((u) => `<a class="brow" href="#/r/${encodeURIComponent(u.round)}"><div class="blabel">@${esc(u.handle)}<div class="bsub">${esc(u.label)}</div></div><div></div><div class="bval" style="color:var(--warn)">${baht(u.total)}</div></a>`).join('')}`
+          : '<div class="sub">ไม่มีออเดอร์ที่ส่งแล้วแต่ยังไม่จ่าย 🎉</div>'}
+        <p class="sub" style="margin:8px 0 0">นับเฉพาะ ${a.payments.tracked} รอบที่ติ๊กจ่าย/แนบสลิปในแอปแล้ว (เริ่มเก็บ 5 ต.ค. 2569)</p>`
+        : '<div class="sub">เริ่มเก็บข้อมูลเมื่อคุณหลีติ๊ก "จ่ายแล้ว" หรือแนบสลิปในแอป — จะเห็นว่าลูกค้าจ่ายเร็วแค่ไหน และใครได้ของแล้วยังไม่จ่าย</div>'}</div>
+      ${a.lapsed.length ? `<div class="card"><h3>😴 ลูกค้าประจำที่หายไป (30 วันขึ้นไป)</h3>
+        <div class="sub" style="margin-bottom:6px">เคยสั่ง 3 รอบขึ้นไป แต่ไม่ได้สั่งมาอย่างน้อย 30 วัน — ลองทักไปชวนได้</div>
+        ${a.lapsed.map((g) => barRow('@' + esc(g.handle), g.rounds, mx(a.lapsed, (x) => x.rounds), `${g.rounds} รอบ`,
+          `หายไป ${g.days} วัน · ${kfmt(g.food)} · ล่าสุด ${esc(g.lastLabel)}`, `#/c/${encodeURIComponent(g.handle)}`)).join('')}</div>` : ''}
+      <div class="card"><h3>📅 ยอดขายรายเดือน</h3>
+        ${a.months.map((m) => barRow(monthTh(m.month), m.food, mx(a.months, (x) => x.food), kfmt(m.food), `${m.rounds} รอบ · ${fmt(m.orders)} ออเดอร์`)).join('')}</div>
+      <div class="card"><h3>🧾 ยอดขายรายรอบ (ล่าสุด ${recent.length} รอบ)</h3>
+        ${recent.map((r) => barRow(esc(r.label.replace(/^\S+ที่ /, '')), r.food, mx(recent, (x) => x.food), kfmt(r.food),
+          `${r.orders} ออเดอร์ · ลูกค้าใหม่ ${r.new}`, `#/r/${encodeURIComponent(r.id)}`)).join('')}</div>
+      <div class="card"><h3>🍱 เมนูขายดี (ตามยอดเงิน)</h3>
+        ${a.dishes.map((d) => barRow(esc(d.name), d.food, mx(a.dishes, (x) => x.food), kfmt(d.food), `${fmt(d.qty)} ชิ้น · ${d.rounds} รอบ`)).join('')}</div>
+      <div class="card"><h3>⭐ ลูกค้าประจำ (ตามยอดซื้อ)</h3>
+        ${a.topCustomers.map((c) => barRow('@' + esc(c.handle), c.food, mx(a.topCustomers, (x) => x.food), kfmt(c.food),
+          `${c.orders} ออเดอร์ · ${c.rounds} รอบ`, `#/c/${encodeURIComponent(c.handle)}`)).join('')}
+        ${a.vendor ? `<p class="sub" style="margin:8px 0 0">ไม่นับ @${esc(a.vendor.handle)} (คุณหลีบันทึกออเดอร์ DM แทนลูกค้า): ${a.vendor.orders} ออเดอร์ · ${baht(a.vendor.food)}</p>` : ''}</div>
+      <div class="card"><h3>🔁 ลูกค้ากลับมาซื้อกี่รอบ</h3>
+        ${a.loyalty.map((l) => barRow(l.label, l.n, mx(a.loyalty, (x) => x.n), `${fmt(l.n)} คน`, t.customers ? Math.round(100 * l.n / t.customers) + '%' : '')).join('')}</div>
+      <div class="card"><h3>📆 วันส่ง (เฉลี่ยต่อรอบ)</h3>
+        ${a.weekdays.map((w) => barRow(w.day, w.food / w.rounds, mx(a.weekdays, (x) => x.food / x.rounds), kfmt(Math.round(w.food / w.rounds)),
+          `${w.rounds} รอบ · เฉลี่ย ${Math.round(w.orders / w.rounds)} ออเดอร์`)).join('')}</div>
+      <div class="card"><h3>🚚 พื้นที่จัดส่ง</h3>
+        ${a.zones.map((z) => barRow(esc(z.zone), z.n, mx(a.zones, (x) => x.n), `${fmt(z.n)}`, t.orders ? (100 * z.n / t.orders).toFixed(1) + '%' : '')).join('')}
+        <div class="sub" style="margin:10px 0 4px">ปณ. ที่ส่งบ่อยที่สุด</div>
+        <div class="chips">${a.zips.map((z) => `<span class="pill">${esc(z.zip)} · ${fmt(z.n)}</span>`).join('')}</div></div>
+    </div>`;
+  $app.querySelectorAll('[data-rg]').forEach((b) => b.onclick = () => { store.set('lee.statsRange', b.dataset.rg); viewStats(); });
 }
 
 /* ------------------------------------------------------------------ boot */
