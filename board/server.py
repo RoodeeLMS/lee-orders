@@ -8,6 +8,9 @@ Write side: SQLite /data/lee.db - things only Khun Lee can supply:
             * per-order status: paid / shipped / shipping-fee override
             * free-text notes and instructions (general, per round, or per order),
               which Nick marks done with a reply
+            * payment slips (images in /data/slips); attaching one ticks the order paid
+            * round status set from the app (open / closed / delivered / cancelled), which
+              overrides the synced status until the round def is updated to match
             Every write is also appended to `events`, which `python server.py inbox` prints for
             the "check her reply" workflow.
 
@@ -27,6 +30,10 @@ HTTP :8080
   POST /api/answer   {round, qid, answer}
   POST /api/note     {text, round?, key?}
   POST /api/note/<id>/done  {reply?}        admins only
+  POST /api/slip?round=&key=     raw image body (jpeg/png/webp/heic, <= 8 MB); ticks paid
+  GET  /api/slip/<id>            the image
+  POST /api/slip/<id>/delete     uploader or admins
+  POST /api/round-status {round, status}
 CLI
   python server.py inbox [since_epoch]   JSON of events + open notes since a timestamp
 """
@@ -36,6 +43,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DATA = os.environ.get('LEE_DATA', '/data')
 SYNC = os.path.join(DATA, 'sync')
 DB = os.path.join(DATA, 'lee.db')
+SLIPS = os.path.join(DATA, 'slips')
+SLIP_MAX = 8 * 1024 * 1024
+ROUND_STATUSES = ('open', 'closed', 'delivered', 'cancelled')
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOCK = threading.Lock()
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
@@ -55,7 +65,7 @@ def db():
 
 
 def init_db():
-    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(SLIPS, exist_ok=True)
     with db() as c:
         c.executescript('''
         CREATE TABLE IF NOT EXISTS status(round_id TEXT, okey TEXT, paid INT DEFAULT 0, shipped INT DEFAULT 0,
@@ -64,6 +74,9 @@ def init_db():
             PRIMARY KEY(round_id, qid));
         CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, at INT, by TEXT, round_id TEXT, okey TEXT,
             text TEXT, done INT DEFAULT 0, done_by TEXT, done_at INT, reply TEXT);
+        CREATE TABLE IF NOT EXISTS slips(id INTEGER PRIMARY KEY, round_id TEXT, okey TEXT, file TEXT, sha TEXT,
+            size INT, by TEXT, at INT);
+        CREATE TABLE IF NOT EXISTS round_state(round_id TEXT PRIMARY KEY, status TEXT, by TEXT, at INT);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, at INT, by TEXT, kind TEXT, round_id TEXT,
             okey TEXT, ref TEXT, payload TEXT);
         ''')
@@ -73,6 +86,23 @@ def log_event(c, by, kind, round_id=None, okey=None, ref=None, payload=None):
     c.execute('INSERT INTO events(at,by,kind,round_id,okey,ref,payload) VALUES(?,?,?,?,?,?,?)',
               (int(time.time()), by, kind, round_id, okey, ref,
                json.dumps(payload, ensure_ascii=False) if payload is not None else None))
+
+
+def image_ext(b):
+    if b[:3] == b'\xff\xd8\xff':
+        return 'jpg', 'image/jpeg'
+    if b[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'png', 'image/png'
+    if b[:4] == b'RIFF' and b[8:12] == b'WEBP':
+        return 'webp', 'image/webp'
+    if b[4:8] == b'ftyp' and b[8:12] in (b'heic', b'heix', b'mif1', b'msf1', b'hevc'):
+        return 'heic', 'image/heic'
+    return None, None
+
+
+def round_status(c, rid, synced):
+    r = c.execute('SELECT * FROM round_state WHERE round_id=?', (rid,)).fetchone()
+    return (r['status'], dict(r)) if r else (synced, None)
 
 
 # --------------------------------------------------------------- round data
@@ -171,6 +201,10 @@ def round_view(rid):
         st = {r['okey']: dict(r) for r in c.execute('SELECT * FROM status WHERE round_id=?', (rid,))}
         ans = {r['qid']: dict(r) for r in c.execute('SELECT * FROM answers WHERE round_id=?', (rid,))}
         notes = [dict(r) for r in c.execute('SELECT * FROM notes WHERE round_id=? ORDER BY id DESC', (rid,))]
+        slips = {}
+        for r in c.execute('SELECT id, okey, by, at FROM slips WHERE round_id=? ORDER BY id', (rid,)):
+            slips.setdefault(r['okey'], []).append({'id': r['id'], 'by': r['by'], 'at': r['at']})
+        status, override = round_status(c, rid, d.get('status'))
     orders = []
     for cap, lst in ((False, d.get('orders', [])), (True, d.get('captionOrders', []))):
         for o in lst:
@@ -188,6 +222,7 @@ def round_view(rid):
                 'food': food, 'fee': fee, 'feeAuto': fee0, 'zone': zone, 'total': food + fee,
                 'paid': bool(s.get('paid')), 'shipped': bool(s.get('shipped')),
                 'address': lookup_address(o['user'], o.get('zip')),
+                'slips': slips.get(k, []),
             })
     active = [o for o in orders if not o['cancelled']]
     prep = {}
@@ -201,7 +236,8 @@ def round_view(rid):
         q['answeredBy'] = a['by'] if a else None
         q['answeredAt'] = a['at'] if a else None
     return {
-        'id': rid, 'title': d.get('title'), 'status': d.get('status'),
+        'id': rid, 'title': d.get('title'), 'status': status, 'syncedStatus': d.get('status'),
+        'statusSetBy': override,
         'deliveryDateLabel': d.get('deliveryDateLabel'), 'deliveryDateFull': d.get('deliveryDateFull'),
         'popupTitle': d.get('popupTitle'), 'payment': d.get('payment', {}),
         'menu': d.get('menu', []), 'displayColumns': d.get('displayColumns') or [m['code'] for m in d.get('menu', [])],
@@ -218,6 +254,7 @@ def summarize(orders, qs, notes):
         'food': sum(o['food'] for o in act), 'fees': sum(o['fee'] for o in act),
         'paid': sum(1 for o in act if o['paid']), 'paidAmt': sum(o['total'] for o in act if o['paid']),
         'shipped': sum(1 for o in act if o['shipped']),
+        'slips': sum(1 for o in act if o['slips']),
         'due': sum(1 for o in act if not o['paid']), 'dueAmt': sum(o['total'] for o in act if not o['paid']),
         'openQuestions': sum(1 for q in qs if not q.get('answer')),
         'openNotes': sum(1 for n in notes if not n['done']),
@@ -230,7 +267,7 @@ def rounds_list():
         v = round_view(r['id'])
         if v is None:
             continue
-        out.append({'id': r['id'], 'title': r.get('title'), 'status': r.get('status'),
+        out.append({'id': r['id'], 'title': r.get('title'), 'status': v['status'],
                     'deliveryDateLabel': r.get('deliveryDateLabel'), 'summary': v['summary']})
     return out
 
@@ -349,6 +386,15 @@ class H(BaseHTTPRequestHandler):
             if m:
                 v = round_view(m.group(1))
                 return self.send(200, v) if v else self.send(404, {'error': 'no such round'})
+            m = re.fullmatch(r'/api/slip/(\d+)', path)
+            if m:
+                with db() as c:
+                    r = c.execute('SELECT file FROM slips WHERE id=?', (int(m.group(1)),)).fetchone()
+                if not r:
+                    return self.send(404, {'error': 'no such slip'})
+                with open(os.path.join(SLIPS, r['file']), 'rb') as f:
+                    b = f.read()
+                return self.send(200, b, image_ext(b)[1] or 'application/octet-stream')
             if path == '/api/customers':
                 return self.send(200, customers())
             m = re.fullmatch(r'/api/customer/([^/]+)', path)
@@ -368,6 +414,12 @@ class H(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         me = self.who()
         by = me['user'] or 'unknown'
+        if path == '/api/slip':
+            try:
+                return self.upload_slip(by)
+            except Exception as e:
+                sys.stderr.write('slip upload failed: %r\n' % e)
+                return self.send(400, {'error': 'bad request'})
         try:
             b = self.body()
             with LOCK, db() as c:
@@ -407,6 +459,31 @@ class H(BaseHTTPRequestHandler):
                                     (int(time.time()), by, rid, b.get('key') or None, text))
                     log_event(c, by, 'note', rid, b.get('key'), str(cur.lastrowid), {'text': text})
                     return self.send(200, {'ok': True, 'id': cur.lastrowid})
+                if path == '/api/round-status':
+                    rid, status = b.get('round'), b.get('status')
+                    d = round_data(rid)
+                    if d is None or status not in ROUND_STATUSES:
+                        return self.send(400, {'error': 'bad round/status'})
+                    prev = round_status(c, rid, d.get('status'))[0]
+                    c.execute('INSERT OR REPLACE INTO round_state(round_id,status,by,at) VALUES(?,?,?,?)',
+                              (rid, status, by, int(time.time())))
+                    log_event(c, by, 'round_status', rid, None, None, {'from': prev, 'to': status})
+                    return self.send(200, {'ok': True})
+                m = re.fullmatch(r'/api/slip/(\d+)/delete', path)
+                if m:
+                    r = c.execute('SELECT * FROM slips WHERE id=?', (int(m.group(1)),)).fetchone()
+                    if not r:
+                        return self.send(404, {'error': 'no such slip'})
+                    if r['by'] != by and 'admins' not in me['groups']:
+                        return self.send(403, {'error': 'only the uploader can remove it'})
+                    c.execute('DELETE FROM slips WHERE id=?', (r['id'],))
+                    if not c.execute('SELECT 1 FROM slips WHERE file=?', (r['file'],)).fetchone():
+                        try:
+                            os.remove(os.path.join(SLIPS, r['file']))
+                        except OSError:
+                            pass
+                    log_event(c, by, 'slip_removed', r['round_id'], r['okey'], str(r['id']))
+                    return self.send(200, {'ok': True})
                 m = re.fullmatch(r'/api/note/(\d+)/done', path)
                 if m:
                     if 'admins' not in me['groups']:
@@ -420,6 +497,38 @@ class H(BaseHTTPRequestHandler):
         except Exception as e:
             sys.stderr.write('POST %s failed: %r\n' % (path, e))
             return self.send(400, {'error': 'bad request'})
+
+
+    def upload_slip(self, by):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        rid, k = (q.get('round') or [''])[0], (q.get('key') or [''])[0]
+        n = int(self.headers.get('Content-Length') or 0)
+        if n <= 0 or n > SLIP_MAX:
+            return self.send(413 if n else 400, {'error': 'ไฟล์ใหญ่เกินไป' if n else 'ไม่มีไฟล์'})
+        blob = self.rfile.read(n)
+        v = round_view(rid) if round_data(rid) is not None else None
+        if not v or not any(o['key'] == k for o in v['orders']):
+            return self.send(400, {'error': 'bad round/key'})
+        ext, _ = image_ext(blob)
+        if not ext:
+            return self.send(415, {'error': 'ไม่ใช่ไฟล์รูป'})
+        sha = hashlib.sha256(blob).hexdigest()
+        with LOCK, db() as c:
+            dup = c.execute('SELECT round_id, okey FROM slips WHERE sha=?', (sha,)).fetchone()
+            if dup:
+                return self.send(409, {'error': 'สลิปนี้แนบไว้แล้วกับ @%s (รอบ %s)' % (
+                    norm_u(dup['okey'].replace('cap:', '')), dup['round_id'][:10])})
+            fn = '%s.%s' % (sha[:32], ext)
+            with open(os.path.join(SLIPS, fn), 'wb') as f:
+                f.write(blob)
+            cur = c.execute('INSERT INTO slips(round_id,okey,file,sha,size,by,at) VALUES(?,?,?,?,?,?,?)',
+                            (rid, k, fn, sha, n, by, int(time.time())))
+            st = c.execute('SELECT * FROM status WHERE round_id=? AND okey=?', (rid, k)).fetchone()
+            st = dict(st) if st else {'shipped': 0, 'fee': None}
+            c.execute('INSERT OR REPLACE INTO status(round_id,okey,paid,shipped,fee,by,at) VALUES(?,?,?,?,?,?,?)',
+                      (rid, k, 1, st['shipped'], st['fee'], by, int(time.time())))
+            log_event(c, by, 'slip', rid, k, str(cur.lastrowid), {'bytes': n})
+        return self.send(200, {'ok': True, 'id': cur.lastrowid})
 
 
 def inbox(since):

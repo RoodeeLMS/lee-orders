@@ -34,7 +34,9 @@ async function copy(text, what = 'คัดลอกแล้ว ✓') {
 }
 const when = (ts) => ts ? new Date(ts * 1000).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 const whenIso = (iso) => iso ? new Date(iso).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-const statusPill = (s) => `<span class="pill ${esc(s)}">${{ open: 'เปิดรับออเดอร์', delivered: 'ส่งแล้ว', cancelled: 'ยกเลิกรอบ', closed: 'ปิดรอบ' }[s] || esc(s)}</span>`;
+const STATUS_LABEL = { open: 'เปิดรับออเดอร์', closed: 'ปิดรับแล้ว', delivered: 'ส่งแล้ว', cancelled: 'ยกเลิกรอบ' };
+const statusPill = (s) => `<span class="pill ${esc(s)}">${STATUS_LABEL[s] || esc(s)}</span>`;
+const pending = (s) => s === 'open' || s === 'closed';   // not delivered yet
 // "ครัวคุณหลี · รอบจัดส่งพฤหัสบดี 8/10/2569 (Cold Pasta + …) — x" -> "Cold Pasta + … — x"
 const shortTitle = (t) => String(t || '').replace(/^ครัวคุณหลี · /, '').replace(/^รอบ(จัด)?ส่ง\S*\s*\d+\/\d+\/\d+\s*/, '')
   .replace(/^\((.*?)\)/, '$1');
@@ -63,15 +65,15 @@ window.addEventListener('hashchange', () => { route(); window.scrollTo(0, 0); })
 /* ---------------------------------------------------------------- rounds */
 async function viewRounds() {
   const rounds = await api('/api/rounds');
-  const open = rounds.filter((r) => r.status === 'open');
-  const rest = rounds.filter((r) => r.status !== 'open');
+  const open = rounds.filter((r) => pending(r.status));
+  const rest = rounds.filter((r) => !pending(r.status));
   const card = (r) => {
     const s = r.summary;
     let line;
     if (r.status === 'cancelled') line = `<span class="sub">ยกเลิกทั้งรอบ</span>`;
     else {
       const chips = [];
-      if (r.status === 'open') {
+      if (pending(r.status)) {
         chips.push(s.due ? `<span class="pill warn">ค้างจ่าย ${baht(s.dueAmt)} · ${s.due} ราย</span>` : `<span class="pill good">จ่ายครบ ✓</span>`);
         chips.push(`<span class="pill">ส่งแล้ว ${s.shipped}/${s.orders}</span>`);
         if (s.openQuestions) chips.push(`<span class="pill warn">❓ รอตอบ ${s.openQuestions}</span>`);
@@ -84,8 +86,8 @@ async function viewRounds() {
       <div class="sub">${esc(shortTitle(r.title))}</div>${line}</a>`;
   };
   $app.innerHTML = `
-    <h1>รอบที่เปิดอยู่</h1>
-    <div class="grid">${open.map(card).join('') || '<p class="empty">ไม่มีรอบที่เปิดอยู่</p>'}</div>
+    <h1>รอบที่ยังไม่ส่ง</h1>
+    <div class="grid">${open.map(card).join('') || '<p class="empty">ไม่มีรอบที่ค้างอยู่</p>'}</div>
     <h2>รอบก่อนหน้า</h2>
     <div class="grid">${rest.slice(0, 10).map(card).join('')}</div>
     ${rest.length > 10 ? `<details><summary class="sub" style="padding:10px 0">ดูทั้งหมดอีก ${rest.length - 10} รอบ</summary><div class="grid">${rest.slice(10).map(card).join('')}</div></details>` : ''}`;
@@ -171,10 +173,27 @@ async function viewRound(id, tab) {
       <div class="stat"><b>${s.paid}/${s.orders}</b><span>จ่ายแล้ว</span></div>
       <div class="stat"><b>${s.shipped}/${s.orders}</b><span>ส่งแล้ว</span></div>
     </div>
-    <div class="sub">${s.orders} ออเดอร์${s.cancelled ? ` (+${s.cancelled} ยกเลิก)` : ''} · อาหาร ${baht(s.food)} · ค่าส่ง ${baht(s.fees)}</div>
+    <div class="sub">${s.orders} ออเดอร์${s.cancelled ? ` (+${s.cancelled} ยกเลิก)` : ''} · อาหาร ${baht(s.food)} · ค่าส่ง ${baht(s.fees)} · <span id="slipCount">สลิป ${s.slips}</span></div>
     ${R.parsedAt ? `<p class="fresh">ข้อมูลออเดอร์อัปเดต ${esc(whenIso(R.parsedAt))}</p>` : ''}
+    <details class="rstat noprint"><summary>⚙️ สถานะรอบ: <b>${STATUS_LABEL[R.status] || esc(R.status)}</b>${R.statusSetBy ? ` <span class="sub">(ตั้งโดย ${esc(R.statusSetBy.by)} ${when(R.statusSetBy.at)})</span>` : ''} ▸</summary>
+      <div class="chips" style="margin:8px 0">${Object.keys(STATUS_LABEL).map((k) => `<button data-rs="${k}" class="${R.status === k ? 'on' : ''}">${STATUS_LABEL[k]}</button>`).join('')}</div>
+      <div class="sub">ปิดรับแล้ว = ไม่รับออเดอร์เพิ่ม · ส่งแล้ว = ย้ายไปรอบก่อนหน้า · แตะ 2 ครั้งเพื่อยืนยัน</div>
+    </details>
     <nav class="tabs">${tabs.map(([k, ic, l, n]) => `<a href="#/r/${encodeURIComponent(R.id)}/${k}" class="${k === tab ? 'on' : ''}"><span class="ic">${ic}</span>${l}${n ? `<span class="badge">${n}</span>` : ''}</a>`).join('')}</nav>
     <section id="tab"></section>`;
+  $app.querySelector('.rstat').onclick = async (ev) => {
+    const b = ev.target.closest('[data-rs]');
+    if (!b || b.dataset.rs === R.status) return;
+    if (!b.dataset.armed) {                       // two taps, so a stray tap can't close a round
+      $app.querySelectorAll('[data-rs]').forEach((x) => { delete x.dataset.armed; x.textContent = STATUS_LABEL[x.dataset.rs]; });
+      b.dataset.armed = '1'; b.textContent = 'แตะอีกครั้ง: ' + STATUS_LABEL[b.dataset.rs];
+      return;
+    }
+    try {
+      await api('/api/round-status', { round: R.id, status: b.dataset.rs });
+      toast('เปลี่ยนสถานะรอบแล้ว ✓'); viewRound(R.id, tab);
+    } catch (e) { toast('ไม่สำเร็จ: ' + e.message); }
+  };
   ({ orders: tabOrders, questions: tabQuestions, prep: tabPrep, ship: tabShip, notes: tabNotes }[tab] || tabOrders)();
 }
 
@@ -239,6 +258,10 @@ function orderCard(o) {
       <button data-act="paid" class="${o.paid ? 'on' : ''}">${o.paid ? '☑ จ่ายแล้ว' : '☐ จ่ายแล้ว'}</button>
       <button data-act="shipped" class="${o.shipped ? 'on' : ''}">${o.shipped ? '☑ ส่งแล้ว' : '☐ ส่งแล้ว'}</button>
     </div>
+    <div class="sliprow noprint">
+      ${o.slips.map((s) => `<img class="slipthumb" src="/api/slip/${s.id}" data-slip="${s.id}" loading="lazy" alt="สลิป">`).join('')}
+      <button data-act="slip" class="${o.paid ? '' : 'slipbtn'}">📎 ${o.slips.length ? 'เพิ่มสลิป' : 'แนบสลิป'}</button>
+    </div>
     <details class="noprint"><summary>▸ ส่งยอด · ที่อยู่ · ค่าส่ง · โน้ต</summary>
       <div class="actions">
         <button data-act="copymsg">📋 สรุปยอด</button>
@@ -257,22 +280,100 @@ function orderCard(o) {
   </div>`;
 }
 
+// Re-render one order card in place, keeping its detail panel open if it was.
+function redraw(card, o, forceOpen) {
+  const open = forceOpen || (card.querySelector('details') && card.querySelector('details').open);
+  card.outerHTML = orderCard(o);
+  if (open) document.querySelector(`[data-key="${CSS.escape(o.key)}"] details`).open = true;
+  refreshStats();
+}
+
+/* ------------------------------------------------------------ payment slips */
+const picker = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/*', hidden: true });
+document.body.appendChild(picker);
+// Must be called synchronously inside the tap handler, or iOS refuses to open the picker.
+const pickFile = () => new Promise((res) => { picker.value = ''; picker.onchange = () => res(picker.files[0]); picker.oncancel = () => res(null); picker.click(); });
+
+// Slips are screenshots of text: 1600 px on the long side keeps them sharp at a fraction of the size.
+async function shrink(file) {
+  try {
+    const url = URL.createObjectURL(file);
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = url; });
+    const k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url);
+    return (await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85))) || file;
+  } catch (e) { return file; }
+}
+
+async function uploadSlip(o, file) {
+  toast('กำลังอัปโหลดสลิป…');
+  const blob = await shrink(file);
+  const r = await fetch(`/api/slip?round=${encodeURIComponent(R.id)}&key=${encodeURIComponent(o.key)}`,
+    { method: 'POST', headers: { 'Content-Type': blob.type || 'application/octet-stream' }, body: blob });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
+  o.slips.push({ id: j.id, by: ME.user, at: Date.now() / 1000 });
+  o.paid = true;
+  R.summary.slips = R.orders.filter((x) => !x.cancelled && x.slips.length).length;
+  const sc = document.getElementById('slipCount');
+  if (sc) sc.textContent = `สลิป ${R.summary.slips}`;
+  toast('แนบสลิปแล้ว ✓ ติ๊กจ่ายแล้วให้');
+}
+
+function openSlip(o, id) {
+  const ov = document.createElement('div');
+  ov.className = 'viewer';
+  ov.innerHTML = `<div class="vbar"><div><b>@${esc(handleOf(o.user))}</b><div class="sub">ยอดที่ต้องจ่าย ${baht(o.food + o.fee)}</div></div>
+      <span class="spacer"></span><button data-x>✕ ปิด</button></div>
+    <img src="/api/slip/${id}" alt="สลิป">
+    <div class="vbar"><span class="spacer"></span><button data-del>🗑 ลบสลิปนี้</button></div>`;
+  const close = () => { ov.remove(); document.removeEventListener('keydown', esc_); };
+  const esc_ = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', esc_);
+  ov.onclick = async (ev) => {
+    if (ev.target === ov || ev.target.closest('[data-x]')) return close();
+    const del = ev.target.closest('[data-del]');
+    if (!del) return;
+    if (!del.dataset.armed) { del.dataset.armed = '1'; del.textContent = 'แตะอีกครั้งเพื่อลบ'; return; }
+    try {
+      await api(`/api/slip/${id}/delete`, {});
+      o.slips = o.slips.filter((s) => s.id !== id);
+      close(); toast('ลบสลิปแล้ว (ยังติ๊กจ่ายแล้วอยู่)');
+      const card = document.querySelector(`[data-key="${CSS.escape(o.key)}"]`);
+      if (card) redraw(card, o);
+    } catch (e) { toast('ไม่สำเร็จ: ' + e.message); }
+  };
+  document.body.appendChild(ov);
+}
+
 async function onOrderClick(ev) {
+  const th = ev.target.closest('[data-slip]');
+  if (th) {
+    const o = R.orders.find((x) => x.key === th.closest('[data-key]').dataset.key);
+    return openSlip(o, Number(th.dataset.slip));
+  }
   const b = ev.target.closest('[data-act]');
   if (!b) return;
   const card = b.closest('[data-key]');
   const o = R.orders.find((x) => x.key === card.dataset.key);
   const act = b.dataset.act;
   try {
+    if (act === 'slip') {
+      const file = await pickFile();
+      if (!file) return;
+      b.disabled = true;
+      await uploadSlip(o, file);
+      return redraw(document.querySelector(`[data-key="${CSS.escape(o.key)}"]`), o);
+    }
     if (act === 'paid' || act === 'shipped') {
       const v = !o[act];
       b.disabled = true;
       await api('/api/status', { round: R.id, key: o.key, [act]: v });
       o[act] = v; toast(v ? (act === 'paid' ? 'บันทึก จ่ายแล้ว ✓' : 'บันทึก ส่งแล้ว ✓') : 'เอาเครื่องหมายออกแล้ว');
-      const open = card.querySelector('details') && card.querySelector('details').open;
-      card.outerHTML = orderCard(o);
-      if (open) document.querySelector(`[data-key="${CSS.escape(o.key)}"] details`).open = true;
-      return refreshStats();
+      return redraw(card, o);
     }
     if (act === 'copymsg') return copy(customerMessage(o), 'คัดลอกสรุปยอดแล้ว ✓');
     if (act === 'copyrem') return copy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓');
@@ -281,9 +382,7 @@ async function onOrderClick(ev) {
       const v = card.querySelector('[data-fee]').value;
       await api('/api/status', { round: R.id, key: o.key, fee: v === '' ? null : Number(v) });
       o.fee = v === '' ? o.feeAuto : Number(v); toast('บันทึกค่าส่งแล้ว ✓');
-      card.outerHTML = orderCard(o);
-      document.querySelector(`[data-key="${CSS.escape(o.key)}"] details`).open = true;
-      return refreshStats();
+      return redraw(card, o, true);
     }
     if (act === 'note') {
       const t = card.querySelector('[data-notetext]').value.trim();

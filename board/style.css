@@ -186,3 +186,25 @@ table.prep td.n { text-align: right; font-weight: 800; font-size: 20px; width: 9
   .card, table.prep { border: 1px solid #999; break-inside: avoid; }
   .grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ---------- payment slips ---------- */
+.sliprow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.slipthumb { width: 46px; height: 62px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); cursor: zoom-in; background: var(--panel2); }
+.sliprow button { min-height: 40px; border-radius: 12px; }
+.sliprow button.slipbtn { flex: 1 1 auto; justify-content: center; border-style: dashed; border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.viewer {
+  position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.88); display: flex; flex-direction: column;
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+}
+.viewer img { flex: 1 1 auto; min-height: 0; width: 100%; object-fit: contain; }
+.viewer .vbar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; color: #fff; }
+.viewer .vbar .sub { color: #ccc; }
+.viewer .vbar button { background: rgba(255,255,255,.12); color: #fff; border-color: rgba(255,255,255,.25); }
+
+/* ---------- round status ---------- */
+.pill.closed { background: var(--warn-bg); color: var(--warn); }
+.rstat { margin: 6px 0 2px; }
+.rstat summary { cursor: pointer; font-size: 14px; list-style: none; padding: 4px 0; color: var(--muted); }
+.rstat summary::-webkit-details-marker { display: none; }
+.rstat summary b { color: var(--text); }
+.rstat [data-armed] { background: var(--accent); border-color: var(--accent); color: #fff; }
