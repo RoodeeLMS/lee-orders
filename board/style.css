@@ -239,3 +239,7 @@ table.prep td.n { text-align: right; font-weight: 800; font-size: 20px; width: 9
 .bfill.ok { background: var(--ok); }
 .bval { font-size: 13px; font-weight: 700; white-space: nowrap; text-align: right; min-width: 52px; }
 @media (max-width: 520px) { header.top nav a { padding: 6px 7px; font-size: 14px; } }
+.hours { display: flex; align-items: flex-end; gap: 2px; height: 120px; margin-top: 10px; }
+.hcol { flex: 1 1 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; }
+.hbar { background: var(--accent2); border-radius: 3px 3px 0 0; }
+.hlab { font-size: 10px; color: var(--muted); text-align: center; height: 14px; }

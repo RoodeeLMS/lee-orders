@@ -667,6 +667,31 @@ function barRow(label, v, max, value, sub, href, cls = '') {
   return href ? `<a class="brow" href="${href}">${inner}</a>` : `<div class="brow">${inner}</div>`;
 }
 
+// Hours/fill-speed cards. Needs postedAt + per-order comment times (backfilled 5/10/2569 from IG).
+function timingCards(a) {
+  const tm = a.timing;
+  if (!tm || !tm.rounds) return '';
+  const filled = a.rounds.filter((r) => r.fill).slice(-15).reverse();
+  const hmax = Math.max(...tm.byHour);
+  const hsum = tm.byHour.reduce((x, y) => x + y, 0) || 1;
+  const peak = tm.byHour.indexOf(hmax);
+  // a slot needs 3+ rounds before it can be called 'best' - one lucky round proves nothing
+  const best = tm.postSlots.filter((x) => x.rounds >= 3).sort((x, y) => y.orders / y.rounds - x.orders / x.rounds)[0];
+  return `
+      <div class="card"><h3>⏱️ ออเดอร์เข้าเร็วแค่ไหนหลังโพสต์</h3>
+        <div class="sub" style="margin-bottom:6px">ค่ากลาง ${tm.rounds} รอบ: ออเดอร์ครึ่งหนึ่งเข้ามาภายใน <b>${tm.medianH50} ชม.</b> หลังโพสต์ (ไม่นับที่คุณหลีบันทึกแทนลูกค้า DM)</div>
+        ${filled.map((r) => barRow(esc(r.label.replace(/^\S+ที่ /, '')), r.fill.h50, Math.max(...filled.map((x) => x.fill.h50)), `${r.fill.h50} ชม.`,
+          `โพสต์ ${esc(r.fill.postedLabel)} · ชม.แรก ${r.fill.in1h}% · 24 ชม. ${r.fill.in24h}%`, `#/r/${encodeURIComponent(r.id)}`)).join('')}</div>
+      <div class="card"><h3>🕐 ลูกค้าคอมเมนต์สั่งช่วงไหน</h3>
+        <div class="sub">ช่วงที่คอมเมนต์เข้ามามากที่สุด ${String(peak).padStart(2, '0')}:00–${String(peak).padStart(2, '0')}:59 (${Math.round(100 * hmax / hsum)}%)</div>
+        <div class="hours">${tm.byHour.map((n, h) => `<div class="hcol" title="${h}:00 · ${n}"><div class="hbar" style="height:${hmax ? Math.max(2, Math.round(100 * n / hmax)) : 0}%"></div><div class="hlab">${h % 3 === 0 ? h : ''}</div></div>`).join('')}</div></div>
+      <div class="card"><h3>📣 โพสต์ช่วงไหนได้ออเดอร์มาก</h3>
+        ${best ? `<div class="sub" style="margin-bottom:6px">โพสต์ช่วง <b>${esc(best.slot)}</b> ได้เฉลี่ย ${Math.round(best.orders / best.rounds)} ออเดอร์/รอบ</div>` : ''}
+        ${tm.postSlots.map((x) => barRow(esc(x.slot), x.orders / x.rounds, Math.max(...tm.postSlots.map((y) => y.orders / y.rounds)),
+          `${Math.round(x.orders / x.rounds)}`, `${x.rounds} รอบ${x.rounds < 3 ? ' (น้อยเกินจะสรุป)' : ''} · เฉลี่ย ${kfmt(Math.round(x.food / x.rounds))}`)).join('')}
+        <p class="sub" style="margin:8px 0 0">ตัวเลข = ออเดอร์เฉลี่ยต่อรอบ · เมนูแต่ละรอบต่างกัน ใช้ดูแนวโน้มคร่าวๆ</p></div>`;
+}
+
 async function viewStats() {
   R = null;
   const rng = store.get('lee.statsRange', 'all');
@@ -712,7 +737,8 @@ async function viewStats() {
         ${a.months.map((m) => barRow(monthTh(m.month), m.food, mx(a.months, (x) => x.food), kfmt(m.food), `${m.rounds} รอบ · ${fmt(m.orders)} ออเดอร์`)).join('')}</div>
       <div class="card"><h3>🧾 ยอดขายรายรอบ (ล่าสุด ${recent.length} รอบ)</h3>
         ${recent.map((r) => barRow(esc(r.label.replace(/^\S+ที่ /, '')), r.food, mx(recent, (x) => x.food), kfmt(r.food),
-          `${r.orders} ออเดอร์ · ลูกค้าใหม่ ${r.new}`, `#/r/${encodeURIComponent(r.id)}`)).join('')}</div>
+          `${r.orders} ออเดอร์ · ลูกค้าใหม่ ${r.new}${r.fill ? ` · ครึ่งหนึ่งใน ${r.fill.h50} ชม.` : ''}`, `#/r/${encodeURIComponent(r.id)}`)).join('')}</div>
+      ${timingCards(a)}
       <div class="card"><h3>🍱 เมนูขายดี (ตามยอดเงิน)</h3>
         ${a.dishes.map((d) => barRow(esc(d.name), d.food, mx(a.dishes, (x) => x.food), kfmt(d.food), `${fmt(d.qty)} ชิ้น · ${d.rounds} รอบ`)).join('')}</div>
       <div class="card"><h3>⭐ ลูกค้าประจำ (ตามยอดซื้อ)</h3>

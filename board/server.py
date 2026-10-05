@@ -343,6 +343,8 @@ def customer(handle):
 
 VENDOR = 'lee_ancharlee'   # her own comments log DM customers' orders: one handle, many people
 TH = datetime.timezone(datetime.timedelta(hours=7))   # the board runs in UTC; days are Bangkok days
+WD_SHORT = ['จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.', 'อา.']
+TH_MON = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.']
 WEEKDAYS = ['จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์', 'อาทิตย์']
 
 
@@ -355,10 +357,37 @@ def be_date(s):
         return None
 
 
+def iso_ts(s):
+    try:
+        return datetime.datetime.fromisoformat(str(s).replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return None
+
+
+def fill_stats(d):
+    """How fast a round filled: minutes from the IG post to each order comment (vendor-logged
+    DM orders excluded - they carry the time Lee typed them, not when the customer ordered)."""
+    posted = iso_ts(d.get('postedAt')) if d.get('postedAt') else None
+    if not posted:
+        return None
+    mins = sorted((iso_ts(o['time']) - posted) / 60 for o in d.get('orders', [])
+                  if o.get('time') and not o.get('cancelled') and norm_u(o['user']) != VENDOR and iso_ts(o['time']))
+    mins = [m for m in mins if m >= 0]
+    if len(mins) < 5:
+        return None
+    n = len(mins)
+    return {'posted': posted, 'n': n, 'h50': round(mins[(n - 1) // 2] / 60, 1), 'h90': round(mins[int((n - 1) * 0.9)] / 60, 1),
+            'in1h': round(100 * sum(1 for m in mins if m <= 60) / n), 'in24h': round(100 * sum(1 for m in mins if m <= 1440) / n),
+            'times': [posted + m * 60 for m in mins]}
+
+
 def analytics(rng):
     today = datetime.datetime.now(TH).date()
     since = today - datetime.timedelta(days=int(rng)) if str(rng).isdigit() else None
     rounds, months, dishes, cust, zones, zips, wk = [], {}, {}, {}, {}, {}, {}
+    by_hour = [0] * 24            # order comments by Bangkok hour of day
+    post_slots = {}               # posting hour bucket -> rounds/orders
+    fills = []
     seen = set()
     entries = []
     first_paid, tracked = {}, set()
@@ -406,7 +435,19 @@ def analytics(rng):
         if not in_range:
             continue
         food, fees = sum(o['food'] for o in act), sum(o['fee'] for o in act)
-        rounds.append({'id': r['id'], 'label': (r.get('deliveryDateLabel') or '').split(' → ')[0],
+        fs = fill_stats(d)
+        if fs:
+            for t in fs.pop('times'):
+                by_hour[datetime.datetime.fromtimestamp(t, TH).hour] += 1
+            pt = datetime.datetime.fromtimestamp(fs['posted'], TH)
+            slot = '%02d:00–%02d:59' % (pt.hour // 3 * 3, pt.hour // 3 * 3 + 2)
+            ps = post_slots.setdefault(slot, {'slot': slot, 'rounds': 0, 'orders': 0, 'food': 0})
+            ps['rounds'] += 1; ps['orders'] += len(act); ps['food'] += food
+            fs['postedLabel'] = '%s %d %s %02d:%02d' % (WD_SHORT[pt.weekday()], pt.day, TH_MON[pt.month - 1], pt.hour, pt.minute)
+            fs['postedWeekday'] = WEEKDAYS[pt.weekday()]
+            fs['leadDays'] = (day - pt.date()).days if day else None
+            fills.append(fs['h50'])
+        rounds.append({'fill': fs,'id': r['id'], 'label': (r.get('deliveryDateLabel') or '').split(' → ')[0],
                        'date': day.isoformat() if day else None, 'status': v['status'],
                        'orders': len(act), 'food': food, 'fees': fees, 'customers': len(handles - {VENDOR}),
                        'new': new, 'paidAmt': v['summary']['paidAmt'], 'dueAmt': v['summary']['dueAmt'],
@@ -465,6 +506,9 @@ def analytics(rng):
         'zones': sorted(({'zone': k, 'n': v} for k, v in zones.items()), key=lambda z: -z['n']),
         'zips': sorted(({'zip': k, 'n': v} for k, v in zips.items()), key=lambda z: -z['n'])[:12],
         'lapsed': sorted(lapsed, key=lambda g: (-g['rounds'], g['days']))[:25],
+        'timing': {'rounds': len(fills), 'medianH50': sorted(fills)[(len(fills) - 1) // 2] if fills else None,
+                   'byHour': by_hour,
+                   'postSlots': sorted(post_slots.values(), key=lambda x: x['slot'])},
         'payments': pay,
     }
 
