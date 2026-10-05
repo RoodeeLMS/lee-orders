@@ -14,7 +14,7 @@ sys.path.insert(0, 'E:/aiboard-platform')
 from aiboard import P, upload, mkdirs   # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
-FILES = ['server.py', 'index.html', 'app.js', 'style.css']
+FILES = ['server.py', 'index.html', 'app.js', 'style.css', 'manifest.webmanifest', 'icon-180.png', 'icon-512.png']
 
 
 def main():

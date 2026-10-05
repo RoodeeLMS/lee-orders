@@ -41,7 +41,10 @@ LOCK = threading.Lock()
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/index.html': ('index.html', 'text/html; charset=utf-8'),
           '/app.js': ('app.js', 'application/javascript; charset=utf-8'),
-          '/style.css': ('style.css', 'text/css; charset=utf-8')}
+          '/style.css': ('style.css', 'text/css; charset=utf-8'),
+          '/manifest.webmanifest': ('manifest.webmanifest', 'application/manifest+json'),
+          '/icon-180.png': ('icon-180.png', 'image/png'),
+          '/icon-512.png': ('icon-512.png', 'image/png')}
 
 
 # ------------------------------------------------------------------ database
@@ -215,6 +218,7 @@ def summarize(orders, qs, notes):
         'food': sum(o['food'] for o in act), 'fees': sum(o['fee'] for o in act),
         'paid': sum(1 for o in act if o['paid']), 'paidAmt': sum(o['total'] for o in act if o['paid']),
         'shipped': sum(1 for o in act if o['shipped']),
+        'due': sum(1 for o in act if not o['paid']), 'dueAmt': sum(o['total'] for o in act if not o['paid']),
         'openQuestions': sum(1 for q in qs if not q.get('answer')),
         'openNotes': sum(1 for n in notes if not n['done']),
     }

@@ -1,5 +1,6 @@
 'use strict';
 // ครัวคุณหลี Orders - single-page app over /api (server.py). No build step, no dependencies.
+// Phone first (Khun Lee); two-column grids from iPad width up (Nick).
 
 const $app = document.getElementById('app');
 const fmt = (n) => Number(n || 0).toLocaleString('en-US');
@@ -7,6 +8,11 @@ const baht = (n) => '฿' + fmt(n);
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 let ME = { user: '', name: '', groups: [] };
 const isAdmin = () => ME.groups.includes('admins');
+// "pausikanya (ไม่ได้ระบุ ปณ. — ใช้ 10330)" -> handle "pausikanya", hint "ไม่ได้ระบุ ปณ. — ใช้ 10330"
+const handleOf = (u) => String(u || '').replace(/\s*\(.*\)\s*$/, '').trim();
+const hintOf = (u) => { const m = String(u || '').match(/\((.*)\)\s*$/); return m ? m[1] : ''; };
+const store = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } } };
 
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
@@ -19,15 +25,19 @@ function toast(msg) {
   t.textContent = msg; t.hidden = false;
   clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 1800);
 }
-async function copy(text) {
-  try { await navigator.clipboard.writeText(text); toast('คัดลอกแล้ว ✓'); }
+async function copy(text, what = 'คัดลอกแล้ว ✓') {
+  try { await navigator.clipboard.writeText(text); toast(what); }
   catch (e) {
-    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
-    ta.select(); document.execCommand('copy'); ta.remove(); toast('คัดลอกแล้ว ✓');
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); toast(what);
   }
 }
 const when = (ts) => ts ? new Date(ts * 1000).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+const whenIso = (iso) => iso ? new Date(iso).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 const statusPill = (s) => `<span class="pill ${esc(s)}">${{ open: 'เปิดรับออเดอร์', delivered: 'ส่งแล้ว', cancelled: 'ยกเลิกรอบ', closed: 'ปิดรอบ' }[s] || esc(s)}</span>`;
+// "ครัวคุณหลี · รอบจัดส่งพฤหัสบดี 8/10/2569 (Cold Pasta + …) — x" -> "Cold Pasta + … — x"
+const shortTitle = (t) => String(t || '').replace(/^ครัวคุณหลี · /, '').replace(/^รอบ(จัด)?ส่ง\S*\s*\d+\/\d+\/\d+\s*/, '')
+  .replace(/^\((.*?)\)/, '$1');
 
 /* ---------------------------------------------------------------- router */
 async function route() {
@@ -48,7 +58,7 @@ async function route() {
     $app.innerHTML = `<p class="empty">โหลดไม่สำเร็จ: ${esc(e.message)}</p>`;
   }
 }
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => { route(); window.scrollTo(0, 0); });
 
 /* ---------------------------------------------------------------- rounds */
 async function viewRounds() {
@@ -57,40 +67,48 @@ async function viewRounds() {
   const rest = rounds.filter((r) => r.status !== 'open');
   const card = (r) => {
     const s = r.summary;
-    const flags = [];
-    if (s.openQuestions && r.status === 'open') flags.push(`<span class="pill warn">❓ รอตอบ ${s.openQuestions}</span>`);
-    if (s.openNotes) flags.push(`<span class="pill warn">📝 โน้ต ${s.openNotes}</span>`);
+    let line;
+    if (r.status === 'cancelled') line = `<span class="sub">ยกเลิกทั้งรอบ</span>`;
+    else {
+      const chips = [];
+      if (r.status === 'open') {
+        chips.push(s.due ? `<span class="pill warn">ค้างจ่าย ${baht(s.dueAmt)} · ${s.due} ราย</span>` : `<span class="pill good">จ่ายครบ ✓</span>`);
+        chips.push(`<span class="pill">ส่งแล้ว ${s.shipped}/${s.orders}</span>`);
+        if (s.openQuestions) chips.push(`<span class="pill warn">❓ รอตอบ ${s.openQuestions}</span>`);
+      }
+      if (s.openNotes) chips.push(`<span class="pill warn">📝 ${s.openNotes}</span>`);
+      line = `<div class="row" style="margin-top:4px"><b>${s.orders} ออเดอร์ · ${baht(s.food)}</b>${chips.join('')}</div>`;
+    }
     return `<a class="card" href="#/r/${encodeURIComponent(r.id)}">
-      <div class="row"><b>${esc(r.deliveryDateLabel || r.id)}</b><span class="spacer"></span>${statusPill(r.status)}</div>
-      <div class="sub">${esc((r.title || '').replace(/^ครัวคุณหลี · /, ''))}</div>
-      <div class="row" style="margin-top:4px"><span>${s.orders} ออเดอร์ · ${baht(s.food)}</span>
-        <span class="pill">จ่ายแล้ว ${s.paid}/${s.orders}</span><span class="pill">ส่งแล้ว ${s.shipped}/${s.orders}</span>${flags.join('')}</div>
-    </a>`;
+      <div class="head"><b style="font-size:17px">${esc((r.deliveryDateLabel || r.id).split(' → ')[0])}</b>${statusPill(r.status)}</div>
+      <div class="sub">${esc(shortTitle(r.title))}</div>${line}</a>`;
   };
   $app.innerHTML = `
     <h1>รอบที่เปิดอยู่</h1>
-    ${open.map(card).join('') || '<p class="empty">ไม่มีรอบที่เปิดอยู่</p>'}
+    <div class="grid">${open.map(card).join('') || '<p class="empty">ไม่มีรอบที่เปิดอยู่</p>'}</div>
     <h2>รอบก่อนหน้า</h2>
-    ${rest.slice(0, 12).map(card).join('')}
-    ${rest.length > 12 ? `<details><summary class="muted">ดูทั้งหมด (${rest.length})</summary>${rest.slice(12).map(card).join('')}</details>` : ''}`;
+    <div class="grid">${rest.slice(0, 10).map(card).join('')}</div>
+    ${rest.length > 10 ? `<details><summary class="sub" style="padding:10px 0">ดูทั้งหมดอีก ${rest.length - 10} รอบ</summary><div class="grid">${rest.slice(10).map(card).join('')}</div></details>` : ''}`;
 }
 
 /* ----------------------------------------------------------------- round */
 let R = null;           // the round currently shown
-let FILTER = 'all';
+const VIEW = { filter: 'all', sort: store.get('lee.sort', 'order'), hideShipped: false };
 const names = () => Object.fromEntries(R.menu.map((m) => [m.code, m.short || m.name]));
 const priceOf = (c) => (R.menu.find((m) => m.code === c) || {}).price || 0;
+const dateFull = () => (R.deliveryDateFull || R.deliveryDateLabel || '').split(' (')[0];
 
 function itemsText(o, sep = ' · ') {
   const n = names();
-  return R.displayColumns.filter((c) => o.items[c]).map((c) => `${n[c] || c} ×${o.items[c]}`).join(sep);
+  const cols = R.displayColumns.concat(Object.keys(o.items).filter((c) => !R.displayColumns.includes(c)));
+  return cols.filter((c) => o.items[c]).map((c) => `${n[c] || c} ×${o.items[c]}`).join(sep);
 }
 
 // Mirrors buildMessage() in the GitHub Pages site (assets/js/order.js).
 function customerMessage(o) {
   const n = names();
   const L = ['**' + (R.popupTitle || 'สรุปยอด'), '', 'จัดส่ง' + (R.deliveryDateFull || R.deliveryDateLabel || ''), ''];
-  for (const c of R.displayColumns.filter((c) => o.items[c])) L.push(`${n[c] || c} ×${o.items[c]}   ${fmt(o.items[c] * priceOf(c))} บาท`);
+  for (const c of Object.keys(o.items).filter((c) => o.items[c])) L.push(`${n[c] || c} ×${o.items[c]}   ${fmt(o.items[c] * priceOf(c))} บาท`);
   if (o.note) L.push(`หมายเหตุ: ${o.note}`);
   L.push(`ค่าส่ง ${fmt(o.fee)} บาท`, '', `รวมเป็นเงิน ${fmt(o.food + o.fee)} บาท`, '');
   const p = R.payment || {};
@@ -101,9 +119,19 @@ function customerMessage(o) {
   return L.join('\n');
 }
 
+// Short, polite payment reminder (Khun Lee sends it herself, so "หลี" is her own first person).
+function reminderMessage(o) {
+  const p = R.payment || {};
+  return [`สวัสดีค่ะ 🙏 แจ้งยอดออเดอร์ครัวคุณหลี รอบ${dateFull()}`,
+    `${itemsText(o)}`,
+    `ยอดอาหาร ${fmt(o.food)} + ค่าส่ง ${fmt(o.fee)} = รวม ${fmt(o.food + o.fee)} บาท`,
+    `โอนได้ที่ ${[p.bank, p.account, p.name].filter(Boolean).join(' ')}`,
+    'โอนแล้วรบกวนส่งสลิปให้หลีด้วยนะคะ ขอบคุณค่ะ 😊'].join('\n');
+}
+
 function deliveryText(o) {
   const a = o.address;
-  const L = [`@${o.user}  ${itemsText(o)}`, `ยอดสินค้า ${fmt(o.food)} + ค่าส่ง ${fmt(o.fee)} = รวม ${fmt(o.food + o.fee)} บาท`, ''];
+  const L = [`@${handleOf(o.user)}  ${itemsText(o)}`, `ยอดสินค้า ${fmt(o.food)} + ค่าส่ง ${fmt(o.fee)} = รวม ${fmt(o.food + o.fee)} บาท`, ''];
   if (a) {
     if (a.name) L.push(a.name);
     if (a.phone) L.push(a.phone);
@@ -115,77 +143,117 @@ function deliveryText(o) {
   return L.join('\n');
 }
 
+function addrHtml(o) {
+  const a = o.address;
+  if (!a) return `<div class="addr"><span class="remark">ไม่พบที่อยู่ในสมุด (ปณ. ${esc(o.zip || '-')}) — ต้องตามเก็บที่อยู่</span></div>`;
+  return `<div class="addr">
+    <div class="nm">${esc(a.name || '')}</div>
+    ${a.address ? `<div>${esc(a.address)}${a.postal && !a.address.includes(a.postal) ? ' ' + esc(a.postal) : ''}</div>` : ''}
+    ${a.ambiguous ? `<div class="remark">⚠️ ลูกค้ามีหลายที่อยู่ — ตรวจ ปณ. ให้ตรงก่อนส่ง</div>` : ''}
+  </div>`;
+}
+const callBtn = (o) => o.address && o.address.phone ? `<a class="btn" href="tel:${esc(o.address.phone.replace(/[^\d+]/g, ''))}">📞 โทร</a>` : '';
+const mapBtn = (o) => o.address && o.address.maps ? `<a class="btn" href="${esc(o.address.maps)}" target="_blank" rel="noopener">📍 Maps</a>` : '';
+
 async function viewRound(id, tab) {
   R = await api('/api/round/' + encodeURIComponent(id));
   const s = R.summary;
-  const tabs = [['orders', 'ออเดอร์'], ['questions', `คำถาม${s.openQuestions ? `<span class="badge">${s.openQuestions}</span>` : ''}`],
-    ['prep', 'เตรียมของ'], ['ship', 'ส่งของ'], ['notes', `โน้ต${s.openNotes ? `<span class="badge">${s.openNotes}</span>` : ''}`]];
+  const tabs = [['orders', '📋', 'ออเดอร์'], ['questions', '❓', 'คำถาม', s.openQuestions], ['prep', '🍳', 'เตรียม'],
+    ['ship', '🚚', 'ส่งของ'], ['notes', '📝', 'โน้ต', s.openNotes]];
   $app.innerHTML = `
-    <div class="row"><h1>${esc(R.deliveryDateLabel || R.id)}</h1><span class="spacer"></span>${statusPill(R.status)}</div>
-    <div class="sub">${esc((R.title || '').replace(/^ครัวคุณหลี · /, ''))}</div>
+    <div class="rhead"><div style="flex:1 1 auto;min-width:0">
+      <h1>${esc((R.deliveryDateLabel || R.id).split(' → ')[0])}</h1>
+      <div class="sub">${esc(shortTitle(R.title))}</div>
+    </div>${statusPill(R.status)}</div>
     <div class="stats">
-      <div class="stat"><b>${s.orders}</b><span>ออเดอร์${s.cancelled ? ` (+${s.cancelled} ยกเลิก)` : ''}</span></div>
-      <div class="stat"><b>${baht(s.food)}</b><span>ยอดอาหาร</span></div>
-      <div class="stat"><b>${baht(s.food + s.fees)}</b><span>รวมค่าส่ง</span></div>
-      <div class="stat"><b>${s.paid}/${s.orders}</b><span>จ่ายแล้ว ${baht(s.paidAmt)}</span></div>
+      <div class="stat"><b>${baht(s.food + s.fees)}</b><span>รวมทั้งหมด</span></div>
+      <div class="stat ${s.due ? 'due' : ''}"><b>${baht(s.dueAmt)}</b><span>ค้าง ${s.due} ราย</span></div>
+      <div class="stat"><b>${s.paid}/${s.orders}</b><span>จ่ายแล้ว</span></div>
       <div class="stat"><b>${s.shipped}/${s.orders}</b><span>ส่งแล้ว</span></div>
     </div>
-    <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/r/${encodeURIComponent(R.id)}/${k}" class="${k === tab ? 'on' : ''}">${l}</a>`).join('')}</nav>
+    <div class="sub">${s.orders} ออเดอร์${s.cancelled ? ` (+${s.cancelled} ยกเลิก)` : ''} · อาหาร ${baht(s.food)} · ค่าส่ง ${baht(s.fees)}</div>
+    ${R.parsedAt ? `<p class="fresh">ข้อมูลออเดอร์อัปเดต ${esc(whenIso(R.parsedAt))}</p>` : ''}
+    <nav class="tabs">${tabs.map(([k, ic, l, n]) => `<a href="#/r/${encodeURIComponent(R.id)}/${k}" class="${k === tab ? 'on' : ''}"><span class="ic">${ic}</span>${l}${n ? `<span class="badge">${n}</span>` : ''}</a>`).join('')}</nav>
     <section id="tab"></section>`;
   ({ orders: tabOrders, questions: tabQuestions, prep: tabPrep, ship: tabShip, notes: tabNotes }[tab] || tabOrders)();
+}
+
+function sorted(list) {
+  const by = VIEW.sort;
+  const l = list.slice();
+  if (by === 'zip') l.sort((a, b) => (a.zip || '99999').localeCompare(b.zip || '99999'));
+  if (by === 'name') l.sort((a, b) => handleOf(a.user).localeCompare(handleOf(b.user)));
+  if (by === 'amount') l.sort((a, b) => (b.food + b.fee) - (a.food + a.fee));
+  if (by === 'due') l.sort((a, b) => (a.paid - b.paid) || ((b.food + b.fee) - (a.food + a.fee)));
+  return l;
 }
 
 function tabOrders() {
   const el = document.getElementById('tab');
   const draw = () => {
-    const q = (document.getElementById('q') || {}).value || '';
+    const q = (document.getElementById('q').value || '').toLowerCase().trim();
     let list = R.orders;
-    if (FILTER === 'unpaid') list = list.filter((o) => !o.cancelled && !o.paid);
-    if (FILTER === 'unshipped') list = list.filter((o) => !o.cancelled && !o.shipped);
-    if (FILTER === 'cancelled') list = list.filter((o) => o.cancelled);
-    if (q) list = list.filter((o) => o.user.toLowerCase().includes(q.toLowerCase()) || (o.zip || '').includes(q));
-    document.getElementById('list').innerHTML = list.map(orderCard).join('') || '<p class="empty">ไม่มีรายการ</p>';
+    if (VIEW.filter === 'due') list = list.filter((o) => !o.cancelled && !o.paid);
+    if (VIEW.filter === 'unshipped') list = list.filter((o) => !o.cancelled && !o.shipped);
+    if (VIEW.filter === 'cancelled') list = list.filter((o) => o.cancelled);
+    if (VIEW.filter === 'all') list = list.filter((o) => !o.cancelled).concat(list.filter((o) => o.cancelled));
+    if (q) list = list.filter((o) => o.user.toLowerCase().includes(q) || (o.zip || '').includes(q) ||
+      ((o.address || {}).name || '').toLowerCase().includes(q));
+    document.getElementById('list').innerHTML = sorted(list).map(orderCard).join('') || '<p class="empty">ไม่มีรายการ</p>';
   };
+  const s = R.summary;
   el.innerHTML = `
-    <div class="filters noprint">
-      ${[['all', 'ทั้งหมด'], ['unpaid', 'ยังไม่จ่าย'], ['unshipped', 'ยังไม่ส่ง'], ['cancelled', 'ยกเลิก']]
-        .map(([k, l]) => `<button data-f="${k}" class="${FILTER === k ? 'on' : ''}">${l}</button>`).join('')}
+    <div class="chips noprint" style="margin-bottom:8px">
+      ${[['all', `ทั้งหมด ${s.orders}`], ['due', `ค้างจ่าย ${s.due}`], ['unshipped', `ยังไม่ส่ง ${s.orders - s.shipped}`], ['cancelled', `ยกเลิก ${s.cancelled}`]]
+        .map(([k, l]) => `<button data-f="${k}" class="${VIEW.filter === k ? 'on' : ''}">${l}</button>`).join('')}
     </div>
-    <input type="search" id="q" placeholder="ค้นหาชื่อ IG หรือ ปณ." class="noprint">
-    <div id="list"></div>`;
-  el.querySelectorAll('[data-f]').forEach((b) => b.onclick = () => { FILTER = b.dataset.f; tabOrders(); });
+    <div class="toolbar noprint">
+      <input type="search" id="q" placeholder="🔍 ชื่อ IG / ชื่อลูกค้า / ปณ.">
+      <select id="sort" style="flex:0 1 170px">
+        ${[['order', 'เรียงตามคอมเมนต์'], ['zip', 'เรียงตาม ปณ.'], ['name', 'เรียงตามชื่อ'], ['amount', 'ยอดมาก → น้อย'], ['due', 'ค้างจ่ายก่อน']]
+          .map(([k, l]) => `<option value="${k}" ${VIEW.sort === k ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    <div id="list" class="grid"></div>`;
+  el.querySelectorAll('[data-f]').forEach((b) => b.onclick = () => { VIEW.filter = b.dataset.f; tabOrders(); });
   document.getElementById('q').oninput = draw;
+  document.getElementById('sort').onchange = (e) => { VIEW.sort = e.target.value; store.set('lee.sort', VIEW.sort); draw(); };
   el.onclick = onOrderClick;
   draw();
 }
 
 function orderCard(o) {
   const k = esc(o.key);
+  const hint = hintOf(o.user);
   const orig = o.editedFrom ? `<div class="orig">✏️ คุณหลีแก้จากเดิม: ${esc(o.editedFrom)}</div>`
     : o.normalizedFrom ? `<div class="orig">📄 ข้อความเดิมของลูกค้า: ${esc(o.normalizedFrom)}</div>` : '';
-  return `<div class="card ord ${o.cancelled ? 'cancelled' : ''}" data-key="${k}">
-    <div class="row"><span class="who-line">${o.caption ? '📌 ' : ''}@${esc(o.user)}</span>
+  return `<div class="card ord ${o.cancelled ? 'cancelled' : ''} ${o.paid ? 'paid' : ''} ${o.shipped ? 'shipped' : ''}" data-key="${k}">
+    <div class="row"><span class="who-line">${o.caption ? '📌 ' : ''}@${esc(handleOf(o.user))}</span>
       <span class="pill">${esc(o.zip || 'ไม่มี ปณ.')}</span><span class="spacer"></span><span class="amt">${baht(o.food + o.fee)}</span></div>
+    ${hint ? `<div class="lbl">${esc(hint)}</div>` : ''}
     <div class="items">${esc(itemsText(o))}</div>
-    ${o.note ? `<div class="note-line">หมายเหตุ: ${esc(o.note)}</div>` : ''}
+    ${o.note ? `<div class="note-line">📌 ${esc(o.note)}</div>` : ''}
     ${o.remark ? `<div class="remark">❓ ${esc(o.remark)}</div>` : ''}
-    ${o.cancelled ? `<div class="remark">${o.movedTo ? '📦 ' + esc(o.movedTo) : '❌ ยกเลิก / ไม่นับยอด'}</div>` : ''}
-    ${o.cancelled ? '' : `<div class="toggles noprint">
-      <button data-act="paid" class="${o.paid ? 'on' : ''}">${o.paid ? '✓ จ่ายแล้ว' : 'ยังไม่จ่าย'}</button>
-      <button data-act="shipped" class="${o.shipped ? 'on' : ''}">${o.shipped ? '✓ ส่งแล้ว' : 'ยังไม่ส่ง'}</button>
-    </div>`}
-    <details class="noprint"><summary>ข้อความ · ที่อยู่ · ค่าส่ง · โน้ต</summary>
+    ${o.cancelled ? `<div class="remark">${o.movedTo ? '📦 ' + esc(o.movedTo) : '❌ ยกเลิก / ไม่นับยอด'}</div>` : `
+    <div class="checks noprint">
+      <button data-act="paid" class="${o.paid ? 'on' : ''}">${o.paid ? '☑ จ่ายแล้ว' : '☐ จ่ายแล้ว'}</button>
+      <button data-act="shipped" class="${o.shipped ? 'on' : ''}">${o.shipped ? '☑ ส่งแล้ว' : '☐ ส่งแล้ว'}</button>
+    </div>
+    <details class="noprint"><summary>▸ ส่งยอด · ที่อยู่ · ค่าส่ง · โน้ต</summary>
+      <div class="actions">
+        <button data-act="copymsg">📋 สรุปยอด</button>
+        ${o.paid ? '' : '<button data-act="copyrem">💬 ทวงยอด</button>'}
+        <button data-act="copydel">📋 คนส่ง</button>
+        ${callBtn(o)}${mapBtn(o)}
+      </div>
+      ${addrHtml(o)}
+      <details><summary class="sub">ดูข้อความสรุปยอดเต็ม</summary><div class="box">${esc(customerMessage(o))}</div></details>
+      <div class="feeRow"><span>ค่าส่ง</span><input type="number" inputmode="numeric" min="0" step="10" value="${o.fee}" data-fee>
+        <button data-act="fee">บันทึก</button><span class="sub">${esc(o.zone)}${o.fee !== o.feeAuto ? ' · ปกติ ' + o.feeAuto : ''}</span></div>
+      <textarea placeholder="ฝากโน้ตเรื่องออเดอร์นี้ เช่น ลูกค้าขอเปลี่ยน…" data-notetext></textarea>
+      <div class="row" style="margin-top:6px"><span class="spacer"></span><button data-act="note" class="primary">ส่งโน้ต</button></div>
       ${orig}
-      <div class="box">${esc(customerMessage(o))}</div>
-      <button data-act="copymsg">📋 คัดลอกข้อความสรุปยอด</button>
-      <div class="box">${esc(deliveryText(o))}</div>
-      <button data-act="copydel">📋 คัดลอกสำหรับคนส่งของ</button>
-      ${o.address && o.address.maps ? `<a class="btn" href="${esc(o.address.maps)}" target="_blank" rel="noopener">📍 เปิด Maps</a>` : ''}
-      <div class="row" style="margin-top:10px"><label>ค่าส่ง (บาท) <span class="sub">· ${esc(o.zone)}${o.fee !== o.feeAuto ? ' · ปกติ ' + o.feeAuto : ''}</span></label>
-        <input type="number" min="0" step="10" value="${o.fee}" data-fee><button data-act="fee">บันทึก</button></div>
-      <textarea placeholder="ฝากโน้ต/คำสั่งเกี่ยวกับออเดอร์นี้ เช่น ลูกค้าขอเปลี่ยน…" data-notetext></textarea>
-      <button data-act="note" class="primary">ส่งโน้ต</button>
-    </details>
+    </details>`}
   </div>`;
 }
 
@@ -198,18 +266,24 @@ async function onOrderClick(ev) {
   try {
     if (act === 'paid' || act === 'shipped') {
       const v = !o[act];
+      b.disabled = true;
       await api('/api/status', { round: R.id, key: o.key, [act]: v });
-      o[act] = v; toast(v ? 'บันทึกแล้ว ✓' : 'ยกเลิกเครื่องหมายแล้ว');
+      o[act] = v; toast(v ? (act === 'paid' ? 'บันทึก จ่ายแล้ว ✓' : 'บันทึก ส่งแล้ว ✓') : 'เอาเครื่องหมายออกแล้ว');
+      const open = card.querySelector('details') && card.querySelector('details').open;
       card.outerHTML = orderCard(o);
+      if (open) document.querySelector(`[data-key="${CSS.escape(o.key)}"] details`).open = true;
       return refreshStats();
     }
-    if (act === 'copymsg') return copy(customerMessage(o));
-    if (act === 'copydel') return copy(deliveryText(o));
+    if (act === 'copymsg') return copy(customerMessage(o), 'คัดลอกสรุปยอดแล้ว ✓');
+    if (act === 'copyrem') return copy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓');
+    if (act === 'copydel') return copy(deliveryText(o), 'คัดลอกสำหรับคนส่งแล้ว ✓');
     if (act === 'fee') {
       const v = card.querySelector('[data-fee]').value;
       await api('/api/status', { round: R.id, key: o.key, fee: v === '' ? null : Number(v) });
       o.fee = v === '' ? o.feeAuto : Number(v); toast('บันทึกค่าส่งแล้ว ✓');
-      card.outerHTML = orderCard(o); return refreshStats();
+      card.outerHTML = orderCard(o);
+      document.querySelector(`[data-key="${CSS.escape(o.key)}"] details`).open = true;
+      return refreshStats();
     }
     if (act === 'note') {
       const t = card.querySelector('[data-notetext]').value.trim();
@@ -217,34 +291,40 @@ async function onOrderClick(ev) {
       await api('/api/note', { round: R.id, key: o.key, text: t });
       card.querySelector('[data-notetext]').value = ''; toast('ส่งโน้ตแล้ว ✓');
     }
-  } catch (e) { toast('ไม่สำเร็จ: ' + e.message); }
+  } catch (e) { toast('ไม่สำเร็จ: ' + e.message); b.disabled = false; }
 }
 
 function refreshStats() {
   const act = R.orders.filter((o) => !o.cancelled);
   const s = R.summary;
   s.paid = act.filter((o) => o.paid).length; s.shipped = act.filter((o) => o.shipped).length;
-  s.paidAmt = act.filter((o) => o.paid).reduce((t, o) => t + o.food + o.fee, 0);
   s.fees = act.reduce((t, o) => t + o.fee, 0);
-  const st = document.querySelectorAll('.stat b');
-  st[2].textContent = baht(s.food + s.fees);
-  st[3].textContent = `${s.paid}/${s.orders}`; st[3].nextElementSibling.textContent = `จ่ายแล้ว ${baht(s.paidAmt)}`;
-  st[4].textContent = `${s.shipped}/${s.orders}`;
+  s.due = act.filter((o) => !o.paid).length; s.dueAmt = act.filter((o) => !o.paid).reduce((t, o) => t + o.food + o.fee, 0);
+  const st = document.querySelectorAll('.stat');
+  st[0].querySelector('b').textContent = baht(s.food + s.fees);
+  st[1].querySelector('b').textContent = baht(s.dueAmt); st[1].querySelector('span').textContent = `ค้าง ${s.due} ราย`;
+  st[1].classList.toggle('due', !!s.due);
+  st[2].querySelector('b').textContent = `${s.paid}/${s.orders}`;
+  st[3].querySelector('b').textContent = `${s.shipped}/${s.orders}`;
 }
 
 function tabQuestions() {
   const el = document.getElementById('tab');
   if (!R.questions.length) { el.innerHTML = '<p class="empty">ไม่มีคำถามค้างในรอบนี้ 🎉</p>'; return; }
   const open = R.questions.filter((q) => !q.answer), done = R.questions.filter((q) => q.answer);
+  const ctx = (q) => {
+    const o = q.user && R.orders.find((x) => handleOf(x.user).toLowerCase() === String(q.user).toLowerCase());
+    return o ? `<div class="ctx">ออเดอร์ @${esc(handleOf(o.user))}: ${esc(itemsText(o))}</div>` : '';
+  };
   const card = (q) => `<div class="card q ${q.answer ? 'done' : ''}" data-qid="${esc(q.id)}">
-    <div class="qtext">${esc(q.text)}</div>
+    <div class="qtext">${esc(q.text)}</div>${ctx(q)}
     ${q.options && q.options.length ? `<div class="opts">${q.options.map((op) => `<button data-opt="${esc(op)}" class="${q.answer === op ? 'on' : ''}">${esc(op)}</button>`).join('')}</div>` : ''}
-    ${q.answer ? `<div class="ans">คำตอบ: ${esc(q.answer)} <span class="sub">· ${esc(q.answeredBy || '')} ${when(q.answeredAt)}</span></div>` : ''}
-    <div class="row" style="margin-top:6px"><input type="text" placeholder="พิมพ์คำตอบ" value="${esc(q.answer && !(q.options || []).includes(q.answer) ? q.answer : '')}" data-free>
-      <button class="primary" data-send>ส่งคำตอบ</button></div>
+    ${q.answer ? `<div class="ans">✓ ${esc(q.answer)} <span class="sub">· ${esc(q.answeredBy || '')} ${when(q.answeredAt)}</span></div>` : ''}
+    <div class="row" style="margin-top:8px"><input type="text" placeholder="${q.options && q.options.length ? 'หรือพิมพ์คำตอบเอง' : 'พิมพ์คำตอบ'}" value="${esc(q.answer && !(q.options || []).includes(q.answer) ? q.answer : '')}" data-free style="flex:1 1 180px">
+      <button class="primary" data-send>ส่ง</button></div>
   </div>`;
-  el.innerHTML = `${open.length ? `<h2>รอคำตอบ (${open.length})</h2>${open.map(card).join('')}` : '<p class="empty">ตอบครบแล้ว 🎉</p>'}
-    ${done.length ? `<h2>ตอบแล้ว</h2>${done.map(card).join('')}` : ''}`;
+  el.innerHTML = `${open.length ? `<h2>รอคำตอบ (${open.length})</h2><div class="grid">${open.map(card).join('')}</div>` : '<p class="empty">ตอบครบแล้ว 🎉 ขอบคุณค่ะ</p>'}
+    ${done.length ? `<h2>ตอบแล้ว</h2><div class="grid">${done.map(card).join('')}</div>` : ''}`;
   el.onclick = async (ev) => {
     const b = ev.target.closest('[data-opt],[data-send]');
     if (!b) return;
@@ -264,42 +344,65 @@ function tabQuestions() {
 function tabPrep() {
   const el = document.getElementById('tab');
   const n = names();
-  const rows = R.displayColumns.filter((c) => R.prep[c]).map((c) => `<tr><td>${esc(n[c] || c)}</td><td class="n">${fmt(R.prep[c])}</td></tr>`).join('');
-  const extra = Object.keys(R.prep).filter((c) => !R.displayColumns.includes(c) && R.prep[c])
-    .map((c) => `<tr><td>${esc(n[c] || c)}</td><td class="n">${fmt(R.prep[c])}</td></tr>`).join('');
+  const codes = R.displayColumns.concat(Object.keys(R.prep).filter((c) => !R.displayColumns.includes(c)));
+  const rows = codes.filter((c) => R.prep[c]).map((c) => `<tr><td>${esc(n[c] || c)}</td><td class="n">${fmt(R.prep[c])}</td></tr>`).join('');
   const withNotes = R.orders.filter((o) => !o.cancelled && o.note);
   el.innerHTML = `
     <div class="row noprint"><span class="sub">รวมทุกออเดอร์ที่ไม่ยกเลิก (รวมออเดอร์ในแคปชั่น)</span><span class="spacer"></span><button onclick="print()">🖨️ พิมพ์</button></div>
-    <h2>${esc(R.deliveryDateLabel || '')} — ต้องเตรียม</h2>
-    <table class="prep">${rows}${extra}</table>
-    ${withNotes.length ? `<h2>ออเดอร์ที่มีหมายเหตุ</h2>${withNotes.map((o) => `<div class="card"><b>@${esc(o.user)}</b> — ${esc(o.note)}<div class="sub">${esc(itemsText(o))}</div></div>`).join('')}` : ''}`;
+    <h2>${esc(dateFull())} — ต้องเตรียม</h2>
+    <table class="prep">${rows}</table>
+    ${withNotes.length ? `<h2>ออเดอร์ที่มีหมายเหตุ (${withNotes.length})</h2><div class="grid">${withNotes.map((o) => `<div class="card"><b>@${esc(handleOf(o.user))}</b> — ${esc(o.note)}<div class="sub">${esc(itemsText(o))}</div></div>`).join('')}</div>` : ''}`;
 }
 
 function tabShip() {
   const el = document.getElementById('tab');
-  const list = R.orders.filter((o) => !o.cancelled).sort((a, b) => (a.zip || '99999').localeCompare(b.zip || '99999'));
-  const missing = list.filter((o) => !o.address).length;
+  const all = R.orders.filter((o) => !o.cancelled).sort((a, b) => (a.zip || '99999').localeCompare(b.zip || '99999'));
+  const list = VIEW.hideShipped ? all.filter((o) => !o.shipped) : all;
+  const missing = all.filter((o) => !o.address).length;
   el.innerHTML = `
-    <div class="row noprint">
-      <a class="btn primary" href="/api/round/${encodeURIComponent(R.id)}/shipping.csv">⬇️ ดาวน์โหลด CSV</a>
+    <div class="toolbar noprint">
+      <a class="btn primary" href="/api/round/${encodeURIComponent(R.id)}/shipping.csv">⬇️ CSV</a>
       <button data-all>📋 คัดลอกทั้งหมด</button>
+      <button data-hide class="${VIEW.hideShipped ? 'on' : ''}">ซ่อนที่ส่งแล้ว</button>
       <button onclick="print()">🖨️ พิมพ์</button>
     </div>
     ${missing ? `<p class="remark">⚠️ ไม่พบที่อยู่ในสมุด ${missing} ราย — ต้องตามเก็บที่อยู่</p>` : ''}
-    ${list.map((o) => `<div class="card"><div class="box" style="margin:0">${esc(deliveryText(o))}</div></div>`).join('')}`;
-  el.querySelector('[data-all]').onclick = () => copy(list.map(deliveryText).join('\n\n— — —\n\n'));
+    <div class="sub" style="margin-bottom:8px">เรียงตาม ปณ. · ${list.length} ราย</div>
+    <div class="grid">${list.map((o) => `<div class="card ord ${o.shipped ? 'shipped' : ''}" data-key="${esc(o.key)}">
+      <div class="row"><span class="who-line">@${esc(handleOf(o.user))}</span><span class="pill">${esc(o.zip || '-')}</span><span class="spacer"></span><span class="amt">${baht(o.food + o.fee)}</span></div>
+      <div class="items">${esc(itemsText(o))}</div>
+      ${o.note ? `<div class="note-line">📌 ${esc(o.note)}</div>` : ''}
+      ${addrHtml(o)}
+      <div class="actions noprint"><button data-act="copydel">📋 คัดลอก</button>${callBtn(o)}${mapBtn(o)}
+        <button data-act="shipped" class="${o.shipped ? 'on' : ''}">${o.shipped ? '☑ ส่งแล้ว' : '☐ ส่งแล้ว'}</button></div>
+    </div>`).join('')}</div>`;
+  el.querySelector('[data-all]').onclick = () => copy(list.map(deliveryText).join('\n\n— — —\n\n'), `คัดลอก ${list.length} รายแล้ว ✓`);
+  el.querySelector('[data-hide]').onclick = () => { VIEW.hideShipped = !VIEW.hideShipped; tabShip(); };
+  el.onclick = async (ev) => {
+    const b = ev.target.closest('[data-act]');
+    if (!b) return;
+    const o = R.orders.find((x) => x.key === b.closest('[data-key]').dataset.key);
+    if (b.dataset.act === 'copydel') return copy(deliveryText(o), 'คัดลอกสำหรับคนส่งแล้ว ✓');
+    if (b.dataset.act === 'shipped') {
+      try {
+        await api('/api/status', { round: R.id, key: o.key, shipped: !o.shipped });
+        o.shipped = !o.shipped; toast(o.shipped ? 'บันทึก ส่งแล้ว ✓' : 'เอาเครื่องหมายออกแล้ว');
+        refreshStats(); tabShip();
+      } catch (e) { toast('ไม่สำเร็จ: ' + e.message); }
+    }
+  };
 }
 
 function noteCard(n) {
   return `<div class="card note ${n.done ? 'done' : ''}" data-id="${n.id}">
-    <div class="meta">${esc(n.by)} · ${when(n.at)}${n.okey ? ` · ออเดอร์ @${esc(n.okey.replace(/^cap:/, ''))}` : ''}${n.round_id && !R ? ` · รอบ ${esc(n.round_id)}` : ''} ${n.done ? '· ✓ จัดการแล้ว' : '· ⏳ รอจัดการ'}</div>
-    <div style="white-space:pre-wrap">${esc(n.text)}</div>
+    <div class="meta">${esc(n.by)} · ${when(n.at)}${n.okey ? ` · ออเดอร์ @${esc(handleOf(n.okey.replace(/^cap:/, '')))}` : ''}${n.round_id && !R ? ` · <a href="#/r/${encodeURIComponent(n.round_id)}/notes">รอบนี้ ›</a>` : ''} ${n.done ? '· ✓ จัดการแล้ว' : '· ⏳ รอจัดการ'}</div>
+    <div style="white-space:pre-wrap;margin-top:4px">${esc(n.text)}</div>
     ${n.reply ? `<div class="reply">↳ ${esc(n.reply)} <span class="sub">(${esc(n.done_by || '')} ${when(n.done_at)})</span></div>` : ''}
-    ${isAdmin() && !n.done ? `<div class="row noprint" style="margin-top:6px"><input type="text" placeholder="ตอบกลับ (ไม่บังคับ)" data-reply><button data-done>✓ จัดการแล้ว</button></div>` : ''}
+    ${isAdmin() && !n.done ? `<div class="row noprint" style="margin-top:8px"><input type="text" placeholder="ตอบกลับ (ไม่บังคับ)" data-reply style="flex:1 1 160px"><button data-done>✓ จัดการแล้ว</button></div>` : ''}
   </div>`;
 }
 
-async function bindNoteDone(el, reload) {
+function bindNoteDone(el, reload) {
   el.onclick = async (ev) => {
     const b = ev.target.closest('[data-done]');
     if (!b) return;
@@ -315,8 +418,8 @@ function tabNotes() {
   const el = document.getElementById('tab');
   el.innerHTML = `
     <div class="card noprint"><textarea id="nt" placeholder="ฝากโน้ต/คำสั่งเกี่ยวกับรอบนี้ เช่น ปิดรับออเดอร์แล้ว, เพิ่มเมนู, เลื่อนวันส่ง…"></textarea>
-      <div class="row" style="margin-top:6px"><span class="spacer"></span><button class="primary" id="ns">ส่งโน้ต</button></div></div>
-    ${R.notes.map(noteCard).join('') || '<p class="empty">ยังไม่มีโน้ตในรอบนี้</p>'}`;
+      <div class="row" style="margin-top:8px"><span class="spacer"></span><button class="primary" id="ns">ส่งโน้ต</button></div></div>
+    <div class="grid">${R.notes.map(noteCard).join('')}</div>${R.notes.length ? '' : '<p class="empty">ยังไม่มีโน้ตในรอบนี้</p>'}`;
   document.getElementById('ns').onclick = async () => {
     const t = document.getElementById('nt').value.trim();
     if (!t) return toast('พิมพ์ข้อความก่อนนะคะ');
@@ -331,15 +434,17 @@ async function viewCustomers() {
   R = null;
   const list = await api('/api/customers');
   $app.innerHTML = `<h1>ลูกค้า</h1><div class="sub">${list.length} ราย · จากทุกรอบในระบบ (ไม่นับออเดอร์ที่ยกเลิก)</div>
-    <input type="search" id="cq" placeholder="ค้นหาชื่อ IG / ชื่อ / ปณ." style="margin:10px 0">
-    <div id="cl"></div>`;
+    <div class="toolbar"><input type="search" id="cq" placeholder="🔍 ชื่อ IG / ชื่อ / ปณ."></div>
+    <div id="cl" class="grid g3"></div><div id="cmore"></div>`;
   const draw = () => {
     const q = document.getElementById('cq').value.trim().toLowerCase();
     const rows = list.filter((c) => !q || c.handle.includes(q) || (c.name || '').toLowerCase().includes(q) || Object.keys(c.zips).some((z) => z.includes(q)));
-    document.getElementById('cl').innerHTML = rows.slice(0, 200).map((c) => `<a class="card" href="#/c/${encodeURIComponent(c.handle)}">
-      <div class="row"><b>@${esc(c.handle)}</b>${c.name ? `<span class="sub">${esc(c.name)}</span>` : ''}<span class="spacer"></span><span class="amt">${baht(c.food)}</span></div>
-      <div class="sub">${c.orders} ออเดอร์ · ล่าสุด ${esc(c.lastLabel)} · ปณ. ${esc(c.lastZip || '-')}${c.known ? '' : ' · ⚠️ ไม่มีที่อยู่ในสมุด'}</div>
-    </a>`).join('') + (rows.length > 200 ? `<p class="sub">แสดง 200 จาก ${rows.length} — พิมพ์ค้นหาเพื่อกรอง</p>` : '');
+    document.getElementById('cl').innerHTML = rows.slice(0, 120).map((c) => `<a class="card" href="#/c/${encodeURIComponent(c.handle)}">
+      <div class="row"><b style="word-break:break-all">@${esc(c.handle)}</b><span class="spacer"></span><span class="amt">${baht(c.food)}</span></div>
+      ${c.name ? `<div class="sub">${esc(c.name)}</div>` : ''}
+      <div class="sub">${c.orders} ออเดอร์ · ล่าสุด ${esc((c.lastLabel || '').split(' → ')[0])} · ปณ. ${esc(c.lastZip || '-')}${c.known ? '' : ' · ⚠️ ไม่มีที่อยู่'}</div>
+    </a>`).join('');
+    document.getElementById('cmore').innerHTML = rows.length > 120 ? `<p class="sub">แสดง 120 จาก ${rows.length} — พิมพ์ค้นหาเพื่อกรอง</p>` : '';
   };
   document.getElementById('cq').oninput = draw;
   draw();
@@ -348,18 +453,21 @@ async function viewCustomers() {
 async function viewCustomer(handle) {
   R = null;
   const c = await api('/api/customer/' + encodeURIComponent(handle));
-  const total = c.history.filter((h) => !h.cancelled).reduce((t, h) => t + h.food, 0);
-  $app.innerHTML = `<p><a href="#/customers">← ลูกค้าทั้งหมด</a></p>
-    <h1>@${esc(c.handle)}</h1>
-    <div class="sub">${c.history.filter((h) => !h.cancelled).length} ออเดอร์ · ${baht(total)} (ยอดอาหาร)</div>
+  const live = c.history.filter((h) => !h.cancelled);
+  const total = live.reduce((t, h) => t + h.food, 0);
+  $app.innerHTML = `<p style="margin:0 0 6px"><a href="#/customers">← ลูกค้าทั้งหมด</a></p>
+    <h1 style="word-break:break-all">@${esc(c.handle)}</h1>
+    <div class="sub">${live.length} ออเดอร์ · ${baht(total)} (ยอดอาหาร)</div>
     <h2>ที่อยู่ในสมุด</h2>
-    ${c.addresses.map((a) => `<div class="card"><div class="row"><span class="pill">${esc(a.postal)}</span><b>${esc(a.name || '')}</b>${a.phone ? `<a href="tel:${esc(a.phone)}">${esc(a.phone)}</a>` : ''}</div>
-      <div>${esc(a.address || '')}</div>${a.maps ? `<a href="${esc(a.maps)}" target="_blank" rel="noopener">📍 Maps</a>` : ''}</div>`).join('') || '<p class="empty">ไม่มีที่อยู่ในสมุด</p>'}
+    <div class="grid">${c.addresses.map((a) => `<div class="card"><div class="row"><span class="pill">${esc(a.postal)}</span><b>${esc(a.name || '')}</b></div>
+      <div style="margin:4px 0">${esc(a.address || '')}</div>
+      <div class="actions">${a.phone ? `<a class="btn" href="tel:${esc(a.phone.replace(/[^\d+]/g, ''))}">📞 ${esc(a.phone)}</a>` : ''}${a.maps ? `<a class="btn" href="${esc(a.maps)}" target="_blank" rel="noopener">📍 Maps</a>` : ''}</div></div>`).join('')}</div>
+    ${c.addresses.length ? '' : '<p class="empty">ไม่มีที่อยู่ในสมุด</p>'}
     <h2>ประวัติออเดอร์</h2>
-    ${c.history.map((h) => `<a class="card ord ${h.cancelled ? 'cancelled' : ''}" href="#/r/${encodeURIComponent(h.round)}">
-      <div class="row"><span class="who-line">${esc(h.label)}</span><span class="pill">${esc(h.zip || '-')}</span><span class="spacer"></span><span class="amt">${baht(h.food)}</span></div>
+    <div class="grid">${c.history.map((h) => `<a class="card ord ${h.cancelled ? 'cancelled' : ''}" href="#/r/${encodeURIComponent(h.round)}">
+      <div class="row"><span class="who-line">${esc((h.label || '').split(' → ')[0])}</span><span class="pill">${esc(h.zip || '-')}</span><span class="spacer"></span><span class="amt">${baht(h.food)}</span></div>
       <div class="items">${esc(h.items.map(([n, q]) => `${n} ×${q}`).join(' · '))}</div>
-      ${h.note ? `<div class="note-line">หมายเหตุ: ${esc(h.note)}</div>` : ''}</a>`).join('')}`;
+      ${h.note ? `<div class="note-line">📌 ${esc(h.note)}</div>` : ''}</a>`).join('')}</div>`;
 }
 
 /* ----------------------------------------------------------------- notes */
@@ -370,11 +478,11 @@ async function viewNotes() {
   const openRound = notes.filter((n) => n.round_id && !n.done);
   $app.innerHTML = `<h1>ฝากข้อความถึงระบบ</h1>
     <div class="sub">คำสั่ง กฎ หรือเรื่องที่อยากให้แก้ — พิมพ์ได้เลย ระบบจะอ่านทุกครั้งที่อัปเดต และติ๊ก ✓ เมื่อจัดการแล้ว</div>
-    <div class="card"><textarea id="gt" placeholder="เช่น จากนี้ไปรอบหมี่คลุก เส้นล้วน = 100 บาท / ลูกค้าคนนี้ใช้ที่อยู่ใหม่ / ปิดรับรอบ 8/10 แล้ว"></textarea>
-      <div class="row" style="margin-top:6px"><span class="spacer"></span><button class="primary" id="gs">ส่งข้อความ</button></div></div>
-    ${openRound.length ? `<h2>โน้ตในรอบต่างๆ ที่รอจัดการ</h2>${openRound.map(noteCard).join('')}` : ''}
+    <div class="card" style="margin-top:10px"><textarea id="gt" placeholder="เช่น จากนี้ไปรอบหมี่คลุก เส้นล้วน = 100 บาท / ลูกค้าคนนี้ใช้ที่อยู่ใหม่ / ปิดรับรอบ 8/10 แล้ว"></textarea>
+      <div class="row" style="margin-top:8px"><span class="spacer"></span><button class="primary" id="gs">ส่งข้อความ</button></div></div>
+    ${openRound.length ? `<h2>โน้ตในรอบต่างๆ ที่รอจัดการ</h2><div class="grid">${openRound.map(noteCard).join('')}</div>` : ''}
     <h2>ข้อความทั่วไป</h2>
-    ${general.map(noteCard).join('') || '<p class="empty">ยังไม่มีข้อความ</p>'}`;
+    <div class="grid">${general.map(noteCard).join('')}</div>${general.length ? '' : '<p class="empty">ยังไม่มีข้อความ</p>'}`;
   document.getElementById('gs').onclick = async () => {
     const t = document.getElementById('gt').value.trim();
     if (!t) return toast('พิมพ์ข้อความก่อนนะคะ');
