@@ -174,7 +174,7 @@ def item_total(items, pr):
 
 def ship_zone(d, o):
     """Mirrors shippingZone() in assets/js/order.js (73/74 = ต่างจังหวัด, Lee 24/9/2569)."""
-    if 'มารับเอง' in (o.get('note') or ''):
+    if 'รับเอง' in (o.get('note') or ''):     # มารับเอง / ไปรับเอง / รับเอง: pickup, no delivery fee
         return 0, 'มารับเอง'
     metro = d.get('shippingMetroPrefixes') or ['10', '11', '12']
     z = o.get('zip') or ''
