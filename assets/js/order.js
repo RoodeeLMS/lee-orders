@@ -95,7 +95,10 @@ function captionSection() {
 // กทม.+ปริมณฑล (BKK + นนทบุรี/ปทุมธานี/สมุทรปราการ) ship cheaper; ต่างจังหวัด is cold-courier.
 // Khun Lee (DM 24/9/2569): นครปฐม (73xxx) and สมุทรสาคร (74xxx) are ต่างจังหวัด, NOT ปริมณฑล.
 // All values are overridable per round via DATA, and the amount stays editable in the popup.
+// Khun Lee (DM 15/8/2569, again 6/10): "มารับเองไม่คิดค่าส่ง" - any pickup note (มารับเอง / ไปรับเอง /
+// รับเอง) means no delivery fee. Checked first: pickups have no postcode, which would otherwise bill 100.
 function shippingZone(order) {
+  if (/รับเอง/.test(order.note || '')) return { fee: 0, label: 'มารับเอง — ไม่คิดค่าส่ง', auto: true };
   const metro = DATA.shippingMetroPrefixes || ['10', '11', '12'];
   if (!order.zip) return { fee: DATA.shippingDefault ?? 100, label: 'ไม่ระบุ ปณ. — ตรวจสอบ', auto: false };
   if (metro.includes(order.zip.slice(0, 2)))
