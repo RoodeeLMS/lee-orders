@@ -304,3 +304,12 @@ table.prep td.n { text-align: right; font-weight: 800; font-size: 20px; width: 9
 .del-body .addr-form label { color: #4b5563; }
 .del-body .addr-form input, .del-body .addr-form textarea { background: #f8fafc; color: #1c1c1e; border-color: #d1d5db; }
 .addr-edit-btn { flex: 0 0 auto; border-radius: 12px; min-height: 46px; }
+.addr-form-h { font-weight: 700; font-size: 14px; }
+.addr-pick { display: grid; gap: 6px; margin-bottom: 10px; }
+.addr-pick-h { font-size: 13px; color: #cfeef6; font-weight: 600; }
+.addr-pick button { display: block; text-align: left; white-space: normal; border-radius: 10px; min-height: 0; padding: 8px 10px;
+  background: rgba(255,255,255,.06); border-color: #1f5566; color: #e6f6fa; line-height: 1.35; }
+.addr-pick button .sub { display: block; color: #9fc6d0; }
+.addr-pick button.on { background: #e6f6fa; color: #04222b; border-color: #7fd4e6; }
+.addr-pick button.on .sub { color: #335a63; }
+.addr-pick button.on::before { content: '✓ '; font-weight: 700; }

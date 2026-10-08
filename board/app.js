@@ -280,6 +280,7 @@ function orderCard(o) {
     <div class="items">${esc(itemsText(o))}</div>
     ${o.note ? `<div class="note-line">📌 ${esc(o.note)}</div>` : ''}
     ${o.remark ? `<div class="remark">❓ ${esc(o.remark)}</div>` : ''}
+    ${!o.cancelled && o.address && o.address.ambiguous ? `<div class="remark">⚠️ มี ${o.address.count} ที่อยู่ — เปิดสลิปเพื่อเลือกที่อยู่ส่ง</div>` : ''}
     ${o.cancelled ? `<div class="remark">${o.movedTo ? '📦 ' + esc(o.movedTo) : '❌ ยกเลิก / ไม่นับยอด'}</div>` : `
     <div class="checks three noprint">
       <button data-act="paid" class="${o.paid ? 'on' : ''}">${o.paid ? '☑ จ่ายแล้ว' : '☐ จ่ายแล้ว'}</button>
@@ -322,8 +323,19 @@ function courierHtml(o) {
     ${a ? `${a.name ? `<div class="del-name">${esc(a.name)}${a.phone ? ` · <a href="tel:${esc(a.phone.replace(/[^\d+]/g, ''))}">${esc(a.phone)}</a>` : ''}</div>` : ''}
       ${a.address ? `<div class="del-addr">${esc(a.address)}${a.postal && !a.address.includes(a.postal) ? ' ' + esc(a.postal) : ''}</div>` : ''}
       ${a.maps ? `<div class="del-maps"><a href="${esc(a.maps)}" target="_blank" rel="noopener">📍 เปิดพิกัด Maps ↗</a></div>` : ''}
-      ${a.ambiguous ? `<div class="del-warn">⚠️ ลูกค้ามีหลายที่อยู่ — ตรวจ ปณ. ให้ตรงก่อนส่ง</div>` : ''}`
+      ${a.ambiguous ? `<div class="del-warn">⚠️ ${a.why === 'samePostal' ? `มี ${a.count} ที่อยู่ ใน ปณ. เดียวกัน` : `ไม่มีที่อยู่ที่ตรง ปณ. ${esc(o.zip || '-')}`} — เลือกที่อยู่ด้านบนให้ถูกก่อนส่ง</div>` : ''}`
     : `<div class="del-warn">ไม่พบที่อยู่ในสมุด (ปณ. ${esc(o.zip || '-')}) — ต้องตามเก็บที่อยู่จากลูกค้า</div>`}`;
+}
+
+// "ส่งที่อยู่ไหน": one button per address when the customer has more than one.
+function addrChooserHtml(o) {
+  if (!o.address || o.address.count < 2) return '';
+  const list = POP && POP.addrs && POP.addrs.handle === handleOf(o.user).toLowerCase() ? POP.addrs.list : null;
+  if (!list) return `<div class="addr-pick"><div class="sub">กำลังโหลด ${o.address.count} ที่อยู่…</div></div>`;
+  return `<div class="addr-pick"><div class="addr-pick-h">ส่งที่อยู่ไหน? <span class="sub">(${list.length} ที่อยู่ · เลือกแล้วใช้กับออเดอร์นี้เท่านั้น)</span></div>
+    ${list.map((a) => `<button data-pick="${esc(a.id)}" class="${a.id === o.address.id ? 'on' : ''}">
+      <b>${esc(a.postal)}</b> · ${esc(a.name || '-')}<span class="sub">${esc((a.address || '').slice(0, 60))}${(a.address || '').length > 60 ? '…' : ''}</span></button>`).join('')}
+  </div>`;
 }
 
 function popupBody(o) {
@@ -359,10 +371,12 @@ function popupBody(o) {
     </div>`}
     <div class="del-card">
       <div class="del-head">📦 สำหรับคนส่งของ <span class="del-sub">(order + ที่อยู่จากสมุด)</span></div>
+      ${addrChooserHtml(o)}
       <div class="del-body">${courierHtml(o)}</div>
-      <div class="row" style="margin-top:12px;gap:8px">
-        <button class="btn-copy btn-copy-del" style="margin:0" data-pop="copydel">📋 คัดลอกสำหรับคนส่งของ</button>
-        <button data-pop="editaddr" class="addr-edit-btn">${o.address ? '✏️ แก้ที่อยู่' : '＋ เพิ่มที่อยู่'}</button>
+      <button class="btn-copy btn-copy-del" data-pop="copydel">📋 คัดลอกสำหรับคนส่งของ</button>
+      <div class="row" style="margin-top:8px;gap:8px">
+        ${o.address ? '<button data-pop="editaddr" class="addr-edit-btn">✏️ แก้ที่อยู่นี้</button>' : ''}
+        <button data-pop="newaddr" class="addr-edit-btn">＋ เพิ่มที่อยู่ใหม่</button>
       </div>
     </div>
     <div class="verify-card">
@@ -409,13 +423,22 @@ function openPopup(o) {
     document.addEventListener('keydown', onPopKey);
     POP = { el, o };
   }
+  const keepScroll = POP.o && POP.o.key === o.key;
   POP.o = o;
+  const top = POP.el.scrollTop;
   POP.el.querySelector('.modal-box').innerHTML = popupBody(o);
-  POP.el.scrollTop = 0;
+  POP.el.scrollTop = keepScroll ? top : 0;
+  const h = handleOf(o.user).toLowerCase();
+  if (o.address && o.address.count > 1 && !(POP.addrs && POP.addrs.handle === h)) {
+    api('/api/addresses/' + encodeURIComponent(h)).then((list) => {
+      if (!POP || handleOf(POP.o.user).toLowerCase() !== h) return;
+      POP.addrs = { handle: h, list }; openPopup(POP.o);
+    }).catch(() => {});
+  }
 }
 function closePopup() {
   if (!POP) return;
-  POP.el.remove(); POP = null;
+  POP.el.remove(); POP = null;   // (POP.addrs goes with it)
   document.body.style.overflow = '';
   document.removeEventListener('keydown', onPopKey);
 }
@@ -465,9 +488,18 @@ async function popCopy(text, label) {
 async function onPopClick(e) {
   if (e.target === POP.el) return closePopup();
   if (await addrFormClick(e, handleOf(POP.o.user).toLowerCase(), async (changed) => {
-    if (changed) await refreshRound();
+    if (changed) { POP.addrs = null; await refreshRound(); }
     repaintPopup();
-  })) return;
+  }, { round: R.id, key: POP.o.key })) return;
+  const pk = e.target.closest('[data-pick]');
+  if (pk) {
+    if (pk.classList.contains('on')) return;
+    try {
+      await api('/api/status', { round: R.id, key: POP.o.key, addr: pk.dataset.pick });
+      toast('เลือกที่อยู่สำหรับออเดอร์นี้แล้ว ✓'); await refreshRound(); repaintPopup();
+    } catch (err) { toast('ไม่สำเร็จ: ' + err.message); }
+    return;
+  }
   const th = e.target.closest('[data-slip]');
   if (th) return openSlip(POP.o, Number(th.dataset.slip));
   const b = e.target.closest('[data-pop]');
@@ -481,10 +513,12 @@ async function onPopClick(e) {
     if (act === 'copymsg') return popCopy(customerMessage(o), 'คัดลอกข้อความแล้ว ✓');
     if (act === 'copyrem') return popCopy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓');
     if (act === 'copydel') return popCopy(deliveryText(o), o.address ? 'คัดลอกข้อความคนส่งแล้ว ✓' : 'คัดลอกแล้ว ✓ (ยังไม่มีที่อยู่ในสมุด)');
-    if (act === 'editaddr') {
-      // A guessed match (several addresses, none for this postcode) becomes a NEW address for this
-      // order's postcode, pre-filled with the name/phone - never an overwrite of the other address.
-      const a = !o.address ? null : o.address.ambiguous ? { name: o.address.name, phone: o.address.phone } : o.address;
+    if (act === 'editaddr') {   // edit the address this order currently ships to
+      POP.el.querySelector('.del-body').innerHTML = addrFormHtml(o.address, o.zip);
+      return;
+    }
+    if (act === 'newaddr') {    // a NEW address (pre-filled name/phone) that this order then ships to
+      const a = o.address ? { name: o.address.name, phone: o.address.phone } : null;
       POP.el.querySelector('.del-body').innerHTML = addrFormHtml(a, o.zip);
       return;
     }
@@ -768,11 +802,13 @@ function tabNotes() {
 }
 
 /* ---------------------------------------------------------- address editor */
-// One form for adding / editing an address. `a` is the existing slot (with .postal) or null for a new one.
+// One form for adding / editing an address. `a` is an existing address (has .id) to edit, or
+// null / a partial record (name, phone) to pre-fill a NEW one.
 function addrFormHtml(a, defaultZip) {
   const v = (k) => esc((a && a[k]) || '');
-  const existing = !!(a && a.postal);
-  return `<div class="addr-form" data-old="${esc((a && a.postal) || '')}">
+  const existing = !!(a && a.id);
+  return `<div class="addr-form" data-id="${esc(existing ? a.id : '')}">
+    <div class="addr-form-h">${existing ? '✏️ แก้ที่อยู่' : '＋ ที่อยู่ใหม่'}</div>
     <label>ชื่อผู้รับ<input type="text" data-af="name" value="${v('name')}" placeholder="เช่น คุณน้ำหวาน"></label>
     <label>เบอร์โทร<input type="text" inputmode="tel" data-af="phone" value="${v('phone')}" placeholder="08x-xxx-xxxx"></label>
     <label>ที่อยู่<textarea data-af="address" placeholder="บ้านเลขที่ ถนน แขวง เขต จังหวัด">${v('address')}</textarea></label>
@@ -784,8 +820,9 @@ function addrFormHtml(a, defaultZip) {
     </div></div>`;
 }
 
-// Handles save / delete / cancel inside `box` (which holds one .addr-form). onDone(changed) re-renders.
-async function addrFormClick(ev, handle, onDone) {
+// Handles save / delete / cancel of one .addr-form. onDone(changed) re-renders. `order` ({round, key})
+// makes a NEW address the one that order ships to.
+async function addrFormClick(ev, handle, onDone, order) {
   const b = ev.target.closest('[data-af-act]');
   if (!b) return false;
   const form = b.closest('.addr-form');
@@ -795,13 +832,13 @@ async function addrFormClick(ev, handle, onDone) {
   try {
     if (act === 'delete') {
       if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'แตะอีกครั้งเพื่อลบ'; return true; }
-      await api('/api/address/delete', { handle, postal: form.dataset.old });
+      await api('/api/address/delete', { handle, id: form.dataset.id });
       toast('ลบที่อยู่แล้ว ✓'); onDone(true); return true;
     }
     if (!/^\d{5}$/.test(val('postal'))) { toast('รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลัก'); return true; }
     b.disabled = true;
-    await api('/api/address', { handle, postal: val('postal'), oldPostal: form.dataset.old || null,
-      name: val('name'), phone: val('phone'), address: val('address'), maps: val('maps') });
+    await api('/api/address', { handle, id: form.dataset.id || null, postal: val('postal'),
+      name: val('name'), phone: val('phone'), address: val('address'), maps: val('maps'), ...(order || {}) });
     toast('บันทึกที่อยู่แล้ว ✓'); onDone(true);
   } catch (e) { toast('ไม่สำเร็จ: ' + e.message); b.disabled = false; }
   return true;
@@ -845,10 +882,11 @@ async function viewCustomer(handle) {
   $app.innerHTML = `<p style="margin:0 0 6px"><a href="#/customers">← ลูกค้าทั้งหมด</a></p>
     <h1 style="word-break:break-all">@${esc(c.handle)}</h1>
     <div class="sub">${live.length} ออเดอร์ · ${baht(total)} (ยอดอาหาร)</div>
-    <div class="row" style="margin-top:18px"><h2 style="margin:0">ที่อยู่ในสมุด</h2><span class="spacer"></span><button class="primary" id="addAddr">＋ เพิ่มที่อยู่</button></div>
+    <div class="row" style="margin-top:18px"><h2 style="margin:0">ที่อยู่ในสมุด${c.addresses.length ? ` (${c.addresses.length})` : ''}</h2><span class="spacer"></span><button class="primary" id="addAddr">＋ เพิ่มที่อยู่</button></div>
+    <div class="sub">เพิ่มได้หลายที่อยู่ (ปณ. ซ้ำกันได้) · แต่ละออเดอร์เลือกที่อยู่ได้ในหน้าสลิป</div>
     <div id="newAddr"></div>
     <div class="grid" id="addrs" style="margin-top:8px">${c.addresses.map((a, i) => `<div class="card" data-ai="${i}">
-      <div class="row"><span class="pill">${esc(a.postal)}</span><b>${esc(a.name || '')}</b><span class="spacer"></span><button data-edit="${i}">✏️ แก้ไข</button></div>
+      <div class="row"><span class="pill">ที่อยู่ ${i + 1}</span><span class="pill">${esc(a.postal)}</span><b>${esc(a.name || '')}</b><span class="spacer"></span><button data-edit="${i}">✏️ แก้ไข</button></div>
       <div style="margin:4px 0">${esc(a.address || '')}</div>
       <div class="actions">${a.phone ? `<a class="btn" href="tel:${esc(a.phone.replace(/[^\d+]/g, ''))}">📞 ${esc(a.phone)}</a>` : ''}${a.maps ? `<a class="btn" href="${esc(a.maps)}" target="_blank" rel="noopener">📍 Maps</a>` : ''}</div>
       ${editedLine(a)}</div>`).join('')}</div>
@@ -858,10 +896,11 @@ async function viewCustomer(handle) {
       <div class="row"><span class="who-line">${esc((h.label || '').split(' → ')[0])}</span><span class="pill">${esc(h.zip || '-')}</span><span class="spacer"></span><span class="amt">${baht(h.food)}</span></div>
       <div class="items">${esc(h.items.map(([n, q]) => `${n} ×${q}`).join(' · '))}</div>
       ${h.note ? `<div class="note-line">📌 ${esc(h.note)}</div>` : ''}</a>`).join('')}</div>`;
-  const reload = (changed) => { if (changed) viewCustomer(handle); else { document.getElementById('newAddr').innerHTML = ''; viewCustomer(handle); } };
+  const reload = () => viewCustomer(handle);
   const lastZip = (live[0] || {}).zip || '';
   document.getElementById('addAddr').onclick = () => {
-    document.getElementById('newAddr').innerHTML = `<div class="card">${addrFormHtml(null, c.addresses.some((a) => a.postal === lastZip) ? '' : lastZip)}</div>`;
+    const first = c.addresses[0];
+    document.getElementById('newAddr').innerHTML = `<div class="card">${addrFormHtml(first ? { name: first.name, phone: first.phone } : null, c.addresses.some((a) => a.postal === lastZip) ? '' : lastZip)}</div>`;
   };
   $app.onclick = async (ev) => {
     if (await addrFormClick(ev, c.handle, reload)) return;

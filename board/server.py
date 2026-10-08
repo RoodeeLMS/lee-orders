@@ -11,8 +11,11 @@ Write side: SQLite /data/lee.db - things only Khun Lee can supply:
             * payment slips (images in /data/slips); attaching one ticks the order paid
             * round status set from the app (open / closed / delivered / cancelled), which
               overrides the synced status until the round def is updated to match
-            * address-book edits (add / change / delete one customer address); they live in
-              `addr_edits` and are applied ON TOP of the synced book, so a re-sync never loses them
+            * address-book edits: every address has its own id ('s:<postal>' for one that came from the
+              synced book, 'a:<hex>' for one added in the app), so a customer can keep any number of
+              addresses, even several with the same postcode. Edits live in `addr_slots` and are applied
+              ON TOP of the synced book, so a re-sync never loses them
+            * per-order address choice (status.addr): which of the customer's addresses this order ships to
             Every write is also appended to `events`, which `python server.py inbox` prints for
             the "check her reply" workflow.
 
@@ -39,8 +42,11 @@ HTTP :8080
   GET  /api/round/<id>/history   every event on the round, newest first
   GET  /api/system               when the system last read comments / synced / read Lee's replies
   GET  /api/analytics?range=all|90|365   sales, dishes, customers, areas, weekdays
-  POST /api/address {handle, postal, oldPostal?, name, phone, address, maps}   add / edit one address
-  POST /api/address/delete {handle, postal}
+  POST /api/address {handle, id?, postal, name, phone, address, maps, round?, key?}   add (no id) / edit;
+                     with round+key the new address is also chosen for that order
+  GET  /api/addresses/<handle>  one customer's addresses (with ids)
+  POST /api/address/delete {handle, id}
+  POST /api/status   ... addr: <address id> | null   ships this order to that address
 CLI (run by Claude through Portainer exec; everything it writes is attributed to SYSTEM_USER)
   python server.py inbox [since_epoch] [--mark]   JSON of events + open notes; --mark logs inbox_read
   python server.py log <kind> <round|-> [json] [--at epoch]   e.g. kind scan / sync
@@ -87,12 +93,27 @@ def init_db():
             text TEXT, done INT DEFAULT 0, done_by TEXT, done_at INT, reply TEXT);
         CREATE TABLE IF NOT EXISTS slips(id INTEGER PRIMARY KEY, round_id TEXT, okey TEXT, file TEXT, sha TEXT,
             size INT, by TEXT, at INT);
+        CREATE TABLE IF NOT EXISTS addr_slots(handle TEXT, sid TEXT, postal TEXT, name TEXT, phone TEXT,
+            address TEXT, maps TEXT, deleted INT DEFAULT 0, by TEXT, at INT, PRIMARY KEY(handle, sid));
         CREATE TABLE IF NOT EXISTS addr_edits(handle TEXT, postal TEXT, name TEXT, phone TEXT, address TEXT,
             maps TEXT, deleted INT DEFAULT 0, by TEXT, at INT, PRIMARY KEY(handle, postal));
         CREATE TABLE IF NOT EXISTS round_state(round_id TEXT PRIMARY KEY, status TEXT, by TEXT, at INT);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, at INT, by TEXT, kind TEXT, round_id TEXT,
             okey TEXT, ref TEXT, payload TEXT);
         ''')
+        migrate(c)
+
+
+def migrate(c):
+    cols = [r[1] for r in c.execute('PRAGMA table_info(status)')]
+    if 'addr' not in cols:
+        c.execute('ALTER TABLE status ADD COLUMN addr TEXT')
+    # addr_edits (keyed by postcode, 8/10/2569 morning) -> addr_slots (keyed by address id)
+    for r in c.execute('SELECT * FROM addr_edits').fetchall():
+        c.execute('INSERT OR IGNORE INTO addr_slots(handle,sid,postal,name,phone,address,maps,deleted,by,at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                  (r['handle'], 's:' + r['postal'], r['postal'], r['name'], r['phone'], r['address'], r['maps'],
+                   r['deleted'], r['by'], r['at']))
+    c.execute('DELETE FROM addr_edits')
 
 
 def log_event(c, by, kind, round_id=None, okey=None, ref=None, payload=None):
@@ -154,49 +175,65 @@ _book = {'key': None, 'data': None, 'checked': 0.0}
 
 
 def addrbook():
-    """The synced book with the app's edits applied on top (cached until either side changes)."""
+    """{'byUser': {handle: {address_id: {postal, name, phone, address, maps, [editedBy, editedAt]}}}}
+    - the synced book (ids 's:<postal>') with the app's edits applied on top. Cached; a write clears it."""
     base = synced_addrbook()
     if _book['data'] is not None and _book['key'][0] == id(base) and time.time() - _book['checked'] < 2:
         return _book['data']        # a page builds hundreds of lookups; re-check the DB at most every 2 s
     _book['checked'] = time.time()
     with db() as c:
-        stamp = c.execute('SELECT COUNT(*), COALESCE(MAX(at), 0) FROM addr_edits').fetchone()
+        stamp = c.execute('SELECT COUNT(*), COALESCE(MAX(at), 0) FROM addr_slots').fetchone()
         key = (id(base), tuple(stamp))
         if _book['key'] == key and _book['data'] is not None:
             return _book['data']
-        edits = [dict(r) for r in c.execute('SELECT * FROM addr_edits ORDER BY at')]
-    by = {h: {p: dict(v) for p, v in slots.items()} for h, slots in base.get('byUser', {}).items()}
+        edits = [dict(r) for r in c.execute('SELECT * FROM addr_slots ORDER BY at')]
+    by = {h: {'s:' + p: dict(v, postal=p) for p, v in slots.items()} for h, slots in base.get('byUser', {}).items()}
     for e in edits:
         slots = by.setdefault(e['handle'], {})
         if e['deleted']:
-            slots.pop(e['postal'], None)
+            slots.pop(e['sid'], None)
         else:
-            slots[e['postal']] = {'name': e['name'] or '', 'phone': e['phone'] or '', 'address': e['address'] or '',
-                                  'maps': e['maps'] or '', 'editedBy': e['by'], 'editedAt': e['at']}
+            slots[e['sid']] = {'postal': e['postal'] or '', 'name': e['name'] or '', 'phone': e['phone'] or '',
+                               'address': e['address'] or '', 'maps': e['maps'] or '', 'editedBy': e['by'], 'editedAt': e['at']}
         if not slots:
             by.pop(e['handle'], None)
     _book.update(key=key, data={'byUser': by}, checked=time.time())
     return _book['data']
 
 
+def addr_list(handle):
+    """A customer's addresses as a list (id included), app-added ones after the synced ones."""
+    slots = addrbook().get('byUser', {}).get(norm_u(handle), {})
+    return [dict(v, id=k) for k, v in sorted(slots.items(), key=lambda kv: (kv[0][:2] != 's:', kv[1].get('postal', ''), kv[0]))]
+
+
 def norm_u(u):
     return re.sub(r'\s*\(.*?\)\s*$', '', str(u or '')).strip().lower()
 
 
-def lookup_address(user, zip_):
-    slots = addrbook().get('byUser', {}).get(norm_u(user))
-    if not slots:
+def lookup_address(user, zip_, choice=None):
+    """Which address an order ships to. A choice saved on the order wins; then the only address
+    with the order's postcode; otherwise a best guess, flagged `ambiguous` so the app asks to check."""
+    opts = addr_list(user)
+    if not opts:
         return None
-    keys = list(slots)
-    if zip_ and zip_ in slots:
-        return dict(slots[zip_], postal=zip_)
-    if len(keys) == 1:
-        return dict(slots[keys[0]], postal=keys[0])
+    pick = lambda a, **kw: dict(a, count=len(opts), **kw)
+    if choice:
+        for a in opts:
+            if a['id'] == choice:
+                return pick(a, chosen=True)
+    same = [a for a in opts if zip_ and a['postal'] == zip_]
+    if len(same) == 1:
+        return pick(same[0])
+    if same:
+        return pick(same[0], ambiguous=True, why='samePostal')
+    if len(opts) == 1:
+        return pick(opts[0])
     if zip_:
-        for k in keys:
-            if k[:2] == zip_[:2]:
-                return dict(slots[k], postal=k, ambiguous=True)
-    return dict(slots[keys[0]], postal=keys[0], ambiguous=True)
+        for a in opts:
+            if a['postal'][:2] == zip_[:2]:
+                return pick(a, ambiguous=True, why='noPostal')
+    return pick(opts[0], ambiguous=True, why='noPostal')
 
 
 def prices(d):
@@ -274,7 +311,8 @@ def round_view(rid):
                 'editedFrom': o.get('editedFrom'), 'normalizedFrom': o.get('normalizedFrom'),
                 'food': food, 'fee': fee, 'feeAuto': fee0, 'zone': zone, 'total': food + fee,
                 'paid': bool(s.get('paid')), 'shipped': bool(s.get('shipped')),
-                'address': lookup_address(o['user'], o.get('zip')),
+                'address': lookup_address(o['user'], o.get('zip'), s.get('addr')),
+                'addrChoice': s.get('addr'),
                 'slips': slips.get(k, []),
                 'acts': {f: {'by': v[0], 'at': v[1], 'via': v[2]} for f, v in acts.get(k, {}).items()},
             })
@@ -348,7 +386,7 @@ def customers():
                 a['lastZip'] = o.get('zip') or a.get('lastZip')
     book = addrbook().get('byUser', {})
     for h, a in agg.items():
-        a['known'] = h in book
+        a['known'] = bool(book.get(h))
         slot = next(iter(book.get(h, {}).values()), None)
         a['name'] = (slot or {}).get('name', '')
     return sorted(agg.values(), key=lambda a: (-a['orders'], a['handle']))
@@ -372,7 +410,7 @@ def customer(handle):
                              'items': [[names.get(k, k), q] for k, q in o.get('items', {}).items() if q],
                              'food': item_total(o.get('items', {}), pr), 'note': o.get('note')})
     hist.sort(key=lambda x: x['round'], reverse=True)
-    addrs = [dict(v, postal=k) for k, v in sorted(addrbook().get('byUser', {}).get(h, {}).items())]
+    addrs = addr_list(h)
     return {'handle': h, 'history': hist, 'addresses': addrs}
 
 
@@ -639,6 +677,9 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, b, image_ext(b)[1] or 'application/octet-stream')
             if path == '/api/customers':
                 return self.send(200, customers())
+            m = re.fullmatch(r'/api/addresses/([^/]+)', path)
+            if m:
+                return self.send(200, addr_list(urllib.parse.unquote(m.group(1))))
             m = re.fullmatch(r'/api/customer/([^/]+)', path)
             if m:
                 return self.send(200, customer(urllib.parse.unquote(m.group(1))))
@@ -670,15 +711,19 @@ class H(BaseHTTPRequestHandler):
                     if round_data(rid) is None or not k:
                         return self.send(400, {'error': 'bad round/key'})
                     cur = c.execute('SELECT * FROM status WHERE round_id=? AND okey=?', (rid, k)).fetchone()
-                    cur = dict(cur) if cur else {'paid': 0, 'shipped': 0, 'fee': None}
+                    cur = dict(cur) if cur else {'paid': 0, 'shipped': 0, 'fee': None, 'addr': None}
+                    if 'addr' in b:
+                        cur['addr'] = str(b['addr'])[:40] if b['addr'] else None
                     for f in ('paid', 'shipped'):
                         if f in b:
                             cur[f] = 1 if b[f] else 0
                     if 'fee' in b:
                         cur['fee'] = None if b['fee'] in (None, '') else max(0, int(b['fee']))
-                    c.execute('INSERT OR REPLACE INTO status(round_id,okey,paid,shipped,fee,by,at) VALUES(?,?,?,?,?,?,?)',
-                              (rid, k, cur['paid'], cur['shipped'], cur['fee'], by, int(time.time())))
-                    log_event(c, by, 'status', rid, k, payload={x: b[x] for x in ('paid', 'shipped', 'fee') if x in b})
+                    c.execute('INSERT OR REPLACE INTO status(round_id,okey,paid,shipped,fee,by,at,addr) VALUES(?,?,?,?,?,?,?,?)',
+                              (rid, k, cur['paid'], cur['shipped'], cur['fee'], by, int(time.time()), cur.get('addr')))
+                    log_event(c, by, 'status', rid, k, payload={x: b[x] for x in ('paid', 'shipped', 'fee', 'addr') if x in b})
+                    if 'addr' in b:
+                        c.commit()
                     return self.send(200, {'ok': True})
                 if path == '/api/answer':
                     rid, qid, a = b.get('round'), b.get('qid'), str(b.get('answer', '')).strip()[:2000]
@@ -703,30 +748,43 @@ class H(BaseHTTPRequestHandler):
                     return self.send(200, {'ok': True, 'id': cur.lastrowid})
                 if path in ('/api/address', '/api/address/delete'):
                     h = norm_u(b.get('handle'))
-                    postal = str(b.get('postal') or '').strip()
-                    if not re.fullmatch(r'[0-9a-z._]{1,40}', h) or not re.fullmatch(r'\d{5}', postal):
-                        return self.send(400, {'error': 'ต้องมีชื่อ IG และรหัสไปรษณีย์ 5 หลัก'})
+                    if not re.fullmatch(r'[0-9a-z._]{1,40}', h):
+                        return self.send(400, {'error': 'ชื่อ IG ไม่ถูกต้อง'})
+                    sid = str(b.get('id') or '')
+                    if sid and not re.fullmatch(r'(s:\d{5}|a:[0-9a-f]{12})', sid):
+                        return self.send(400, {'error': 'bad address id'})
                     now = int(time.time())
                     _book['data'] = None          # the next lookup rebuilds the merged book
                     if path == '/api/address/delete':
-                        c.execute('INSERT OR REPLACE INTO addr_edits(handle,postal,deleted,by,at) VALUES(?,?,1,?,?)', (h, postal, by, now))
-                        log_event(c, by, 'addr_delete', None, None, h, {'handle': h, 'postal': postal})
+                        if not sid:
+                            return self.send(400, {'error': 'bad address id'})
+                        c.execute('INSERT OR REPLACE INTO addr_slots(handle,sid,deleted,by,at) VALUES(?,?,1,?,?)', (h, sid, by, now))
+                        log_event(c, by, 'addr_delete', None, None, h, {'handle': h, 'id': sid})
                         c.commit(); _book['data'] = None     # commit before replying: the app re-reads at once
                         return self.send(200, {'ok': True})
+                    postal = str(b.get('postal') or '').strip()
+                    if not re.fullmatch(r'\d{5}', postal):
+                        return self.send(400, {'error': 'รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลัก'})
                     f = {k: str(b.get(k) or '').strip()[:500] for k in ('name', 'phone', 'address', 'maps')}
                     if not (f['name'] or f['address']):
                         return self.send(400, {'error': 'ใส่ชื่อหรือที่อยู่อย่างน้อยหนึ่งอย่าง'})
                     if f['maps'] and not re.match(r'https?://', f['maps']):
                         return self.send(400, {'error': 'ลิงก์ Maps ต้องขึ้นต้นด้วย http'})
-                    old = str(b.get('oldPostal') or '').strip()
-                    if old and old != postal and re.fullmatch(r'\d{5}', old):   # postcode changed: retire the old slot
-                        c.execute('INSERT OR REPLACE INTO addr_edits(handle,postal,deleted,by,at) VALUES(?,?,1,?,?)', (h, old, by, now))
-                    c.execute('INSERT OR REPLACE INTO addr_edits(handle,postal,name,phone,address,maps,deleted,by,at) VALUES(?,?,?,?,?,?,0,?,?)',
-                              (h, postal, f['name'], f['phone'], f['address'], f['maps'], by, now))
-                    log_event(c, by, 'addr_edit', None, None, h, {'handle': h, 'postal': postal, 'oldPostal': old or None,
-                                                                  'new': not old})
+                    new = not sid
+                    if new:
+                        sid = 'a:' + os.urandom(6).hex()
+                    c.execute('INSERT OR REPLACE INTO addr_slots(handle,sid,postal,name,phone,address,maps,deleted,by,at) VALUES(?,?,?,?,?,?,?,0,?,?)',
+                              (h, sid, postal, f['name'], f['phone'], f['address'], f['maps'], by, now))
+                    log_event(c, by, 'addr_edit', None, None, h, {'handle': h, 'id': sid, 'postal': postal, 'new': new})
+                    rid, k = b.get('round'), b.get('key')
+                    if new and rid and k and round_data(rid) is not None:   # added from an order: ship that order there
+                        cur = c.execute('SELECT * FROM status WHERE round_id=? AND okey=?', (rid, k)).fetchone()
+                        cur = dict(cur) if cur else {'paid': 0, 'shipped': 0, 'fee': None}
+                        c.execute('INSERT OR REPLACE INTO status(round_id,okey,paid,shipped,fee,by,at,addr) VALUES(?,?,?,?,?,?,?,?)',
+                                  (rid, k, cur['paid'], cur['shipped'], cur['fee'], by, now, sid))
+                        log_event(c, by, 'status', rid, k, payload={'addr': sid})
                     c.commit(); _book['data'] = None
-                    return self.send(200, {'ok': True})
+                    return self.send(200, {'ok': True, 'id': sid})
                 if path == '/api/round-status':
                     rid, status = b.get('round'), b.get('status')
                     d = round_data(rid)
@@ -791,9 +849,9 @@ class H(BaseHTTPRequestHandler):
             cur = c.execute('INSERT INTO slips(round_id,okey,file,sha,size,by,at) VALUES(?,?,?,?,?,?,?)',
                             (rid, k, fn, sha, n, by, int(time.time())))
             st = c.execute('SELECT * FROM status WHERE round_id=? AND okey=?', (rid, k)).fetchone()
-            st = dict(st) if st else {'shipped': 0, 'fee': None}
-            c.execute('INSERT OR REPLACE INTO status(round_id,okey,paid,shipped,fee,by,at) VALUES(?,?,?,?,?,?,?)',
-                      (rid, k, 1, st['shipped'], st['fee'], by, int(time.time())))
+            st = dict(st) if st else {'shipped': 0, 'fee': None, 'addr': None}
+            c.execute('INSERT OR REPLACE INTO status(round_id,okey,paid,shipped,fee,by,at,addr) VALUES(?,?,?,?,?,?,?,?)',
+                      (rid, k, 1, st['shipped'], st['fee'], by, int(time.time()), st.get('addr')))
             log_event(c, by, 'slip', rid, k, str(cur.lastrowid), {'bytes': n})
         return self.send(200, {'ok': True, 'id': cur.lastrowid})
 
@@ -851,7 +909,7 @@ if __name__ == '__main__':
     if argv and argv[0] == 'addr-edits':   # every address edit made in the app, as JSON
         sys.stdout.reconfigure(encoding='utf-8')
         with db() as c:
-            print(json.dumps([dict(r) for r in c.execute('SELECT * FROM addr_edits ORDER BY at')], ensure_ascii=False))
+            print(json.dumps([dict(r) for r in c.execute('SELECT * FROM addr_slots ORDER BY at')], ensure_ascii=False))
         sys.exit(0)
     if argv and argv[0] == 'note-done':    # note-done <id> [reply]
         with db() as c:
