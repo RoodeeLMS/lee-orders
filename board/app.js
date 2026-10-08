@@ -51,6 +51,7 @@ const shortTitle = (t) => String(t || '').replace(/^ครัวคุณหล�
 
 /* ---------------------------------------------------------------- router */
 async function route() {
+  $app.onclick = null;   // views that need a page-level click handler set their own
   const h = location.hash.replace(/^#/, '') || '/';
   const parts = h.split('/').filter(Boolean).map(decodeURIComponent);
   document.querySelectorAll('header nav a').forEach((a) => a.classList.toggle('on',
@@ -359,7 +360,10 @@ function popupBody(o) {
     <div class="del-card">
       <div class="del-head">📦 สำหรับคนส่งของ <span class="del-sub">(order + ที่อยู่จากสมุด)</span></div>
       <div class="del-body">${courierHtml(o)}</div>
-      <button class="btn-copy btn-copy-del" data-pop="copydel">📋 คัดลอกสำหรับคนส่งของ</button>
+      <div class="row" style="margin-top:12px;gap:8px">
+        <button class="btn-copy btn-copy-del" style="margin:0" data-pop="copydel">📋 คัดลอกสำหรับคนส่งของ</button>
+        <button data-pop="editaddr" class="addr-edit-btn">${o.address ? '✏️ แก้ที่อยู่' : '＋ เพิ่มที่อยู่'}</button>
+      </div>
     </div>
     <div class="verify-card">
       <div class="verify-label">🔎 คอมเมนต์ต้นฉบับ (สำหรับยืนยัน — ไม่ต้องส่งลูกค้า)</div>
@@ -382,6 +386,16 @@ function popupBody(o) {
 }
 
 let POP = null;   // { el, o } while the slip popup is open
+
+// Re-read the round (addresses are looked up server-side) and keep the open popup on the same order.
+async function refreshRound() {
+  const fresh = await api('/api/round/' + encodeURIComponent(R.id));
+  R.orders = fresh.orders; R.summary = fresh.summary;
+  if (POP) POP.o = R.orders.find((x) => x.key === POP.o.key) || POP.o;
+  const tabEl = document.querySelector('.tabs a.on');
+  const tab = tabEl ? tabEl.getAttribute('href').split('/').pop() : 'orders';
+  if (tab === 'orders') tabOrders(); else if (tab === 'ship') tabShip();
+}
 function openPopup(o) {
   if (!POP) {
     const el = document.createElement('div');
@@ -450,6 +464,10 @@ async function popCopy(text, label) {
 }
 async function onPopClick(e) {
   if (e.target === POP.el) return closePopup();
+  if (await addrFormClick(e, handleOf(POP.o.user).toLowerCase(), async (changed) => {
+    if (changed) await refreshRound();
+    repaintPopup();
+  })) return;
   const th = e.target.closest('[data-slip]');
   if (th) return openSlip(POP.o, Number(th.dataset.slip));
   const b = e.target.closest('[data-pop]');
@@ -463,6 +481,13 @@ async function onPopClick(e) {
     if (act === 'copymsg') return popCopy(customerMessage(o), 'คัดลอกข้อความแล้ว ✓');
     if (act === 'copyrem') return popCopy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓');
     if (act === 'copydel') return popCopy(deliveryText(o), o.address ? 'คัดลอกข้อความคนส่งแล้ว ✓' : 'คัดลอกแล้ว ✓ (ยังไม่มีที่อยู่ในสมุด)');
+    if (act === 'editaddr') {
+      // A guessed match (several addresses, none for this postcode) becomes a NEW address for this
+      // order's postcode, pre-filled with the name/phone - never an overwrite of the other address.
+      const a = !o.address ? null : o.address.ambiguous ? { name: o.address.name, phone: o.address.phone } : o.address;
+      POP.el.querySelector('.del-body').innerHTML = addrFormHtml(a, o.zip);
+      return;
+    }
     if (act === 'slip') {
       const file = await pickFile();
       if (!file) return;
@@ -742,16 +767,65 @@ function tabNotes() {
   bindNoteDone(el, () => viewRound(R.id, 'notes'));
 }
 
+/* ---------------------------------------------------------- address editor */
+// One form for adding / editing an address. `a` is the existing slot (with .postal) or null for a new one.
+function addrFormHtml(a, defaultZip) {
+  const v = (k) => esc((a && a[k]) || '');
+  const existing = !!(a && a.postal);
+  return `<div class="addr-form" data-old="${esc((a && a.postal) || '')}">
+    <label>ชื่อผู้รับ<input type="text" data-af="name" value="${v('name')}" placeholder="เช่น คุณน้ำหวาน"></label>
+    <label>เบอร์โทร<input type="text" inputmode="tel" data-af="phone" value="${v('phone')}" placeholder="08x-xxx-xxxx"></label>
+    <label>ที่อยู่<textarea data-af="address" placeholder="บ้านเลขที่ ถนน แขวง เขต จังหวัด">${v('address')}</textarea></label>
+    <label>รหัสไปรษณีย์<input type="text" inputmode="numeric" maxlength="5" data-af="postal" value="${esc((a && a.postal) || defaultZip || '')}" placeholder="5 หลัก"></label>
+    <label>ลิงก์ Google Maps (ถ้ามี)<input type="text" inputmode="url" data-af="maps" value="${v('maps')}" placeholder="https://maps.app.goo.gl/..."></label>
+    <div class="row" style="margin-top:8px">
+      ${existing ? '<button data-af-act="delete">🗑 ลบที่อยู่นี้</button>' : ''}
+      <span class="spacer"></span><button data-af-act="cancel">ยกเลิก</button><button class="primary" data-af-act="save">💾 บันทึก</button>
+    </div></div>`;
+}
+
+// Handles save / delete / cancel inside `box` (which holds one .addr-form). onDone(changed) re-renders.
+async function addrFormClick(ev, handle, onDone) {
+  const b = ev.target.closest('[data-af-act]');
+  if (!b) return false;
+  const form = b.closest('.addr-form');
+  const act = b.dataset.afAct;
+  if (act === 'cancel') { onDone(false); return true; }
+  const val = (k) => form.querySelector(`[data-af="${k}"]`).value.trim();
+  try {
+    if (act === 'delete') {
+      if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'แตะอีกครั้งเพื่อลบ'; return true; }
+      await api('/api/address/delete', { handle, postal: form.dataset.old });
+      toast('ลบที่อยู่แล้ว ✓'); onDone(true); return true;
+    }
+    if (!/^\d{5}$/.test(val('postal'))) { toast('รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลัก'); return true; }
+    b.disabled = true;
+    await api('/api/address', { handle, postal: val('postal'), oldPostal: form.dataset.old || null,
+      name: val('name'), phone: val('phone'), address: val('address'), maps: val('maps') });
+    toast('บันทึกที่อยู่แล้ว ✓'); onDone(true);
+  } catch (e) { toast('ไม่สำเร็จ: ' + e.message); b.disabled = false; }
+  return true;
+}
+const editedLine = (a) => a.editedBy ? `<div class="sub">✏️ แก้โดย ${esc(whoName(a.editedBy))} ${when(a.editedAt)}</div>` : '';
+
 /* ------------------------------------------------------------- customers */
 async function viewCustomers() {
   R = null;
   const list = await api('/api/customers');
   $app.innerHTML = `<h1>ลูกค้า</h1><div class="sub">${list.length} ราย · จากทุกรอบในระบบ (ไม่นับออเดอร์ที่ยกเลิก)</div>
+    <div class="chips" style="margin:8px 0">
+      <button data-cf="all" class="on">ทั้งหมด</button><button data-cf="missing">⚠️ ไม่มีที่อยู่ ${list.filter((c) => !c.known).length}</button>
+    </div>
     <div class="toolbar"><input type="search" id="cq" placeholder="🔍 ชื่อ IG / ชื่อ / ปณ."></div>
     <div id="cl" class="grid g3"></div><div id="cmore"></div>`;
+  let only = 'all';
+  $app.querySelectorAll('[data-cf]').forEach((b) => b.onclick = () => {
+    only = b.dataset.cf; $app.querySelectorAll('[data-cf]').forEach((x) => x.classList.toggle('on', x === b)); draw();
+  });
   const draw = () => {
     const q = document.getElementById('cq').value.trim().toLowerCase();
-    const rows = list.filter((c) => !q || c.handle.includes(q) || (c.name || '').toLowerCase().includes(q) || Object.keys(c.zips).some((z) => z.includes(q)));
+    const rows = list.filter((c) => (only === 'all' || !c.known) &&
+      (!q || c.handle.includes(q) || (c.name || '').toLowerCase().includes(q) || Object.keys(c.zips).some((z) => z.includes(q))));
     document.getElementById('cl').innerHTML = rows.slice(0, 120).map((c) => `<a class="card" href="#/c/${encodeURIComponent(c.handle)}">
       <div class="row"><b style="word-break:break-all">@${esc(c.handle)}</b><span class="spacer"></span><span class="amt">${baht(c.food)}</span></div>
       ${c.name ? `<div class="sub">${esc(c.name)}</div>` : ''}
@@ -771,16 +845,32 @@ async function viewCustomer(handle) {
   $app.innerHTML = `<p style="margin:0 0 6px"><a href="#/customers">← ลูกค้าทั้งหมด</a></p>
     <h1 style="word-break:break-all">@${esc(c.handle)}</h1>
     <div class="sub">${live.length} ออเดอร์ · ${baht(total)} (ยอดอาหาร)</div>
-    <h2>ที่อยู่ในสมุด</h2>
-    <div class="grid">${c.addresses.map((a) => `<div class="card"><div class="row"><span class="pill">${esc(a.postal)}</span><b>${esc(a.name || '')}</b></div>
+    <div class="row" style="margin-top:18px"><h2 style="margin:0">ที่อยู่ในสมุด</h2><span class="spacer"></span><button class="primary" id="addAddr">＋ เพิ่มที่อยู่</button></div>
+    <div id="newAddr"></div>
+    <div class="grid" id="addrs" style="margin-top:8px">${c.addresses.map((a, i) => `<div class="card" data-ai="${i}">
+      <div class="row"><span class="pill">${esc(a.postal)}</span><b>${esc(a.name || '')}</b><span class="spacer"></span><button data-edit="${i}">✏️ แก้ไข</button></div>
       <div style="margin:4px 0">${esc(a.address || '')}</div>
-      <div class="actions">${a.phone ? `<a class="btn" href="tel:${esc(a.phone.replace(/[^\d+]/g, ''))}">📞 ${esc(a.phone)}</a>` : ''}${a.maps ? `<a class="btn" href="${esc(a.maps)}" target="_blank" rel="noopener">📍 Maps</a>` : ''}</div></div>`).join('')}</div>
-    ${c.addresses.length ? '' : '<p class="empty">ไม่มีที่อยู่ในสมุด</p>'}
+      <div class="actions">${a.phone ? `<a class="btn" href="tel:${esc(a.phone.replace(/[^\d+]/g, ''))}">📞 ${esc(a.phone)}</a>` : ''}${a.maps ? `<a class="btn" href="${esc(a.maps)}" target="_blank" rel="noopener">📍 Maps</a>` : ''}</div>
+      ${editedLine(a)}</div>`).join('')}</div>
+    ${c.addresses.length ? '' : '<p class="empty">ไม่มีที่อยู่ในสมุด — กด ＋ เพิ่มที่อยู่</p>'}
     <h2>ประวัติออเดอร์</h2>
     <div class="grid">${c.history.map((h) => `<a class="card ord ${h.cancelled ? 'cancelled' : ''}" href="#/r/${encodeURIComponent(h.round)}">
       <div class="row"><span class="who-line">${esc((h.label || '').split(' → ')[0])}</span><span class="pill">${esc(h.zip || '-')}</span><span class="spacer"></span><span class="amt">${baht(h.food)}</span></div>
       <div class="items">${esc(h.items.map(([n, q]) => `${n} ×${q}`).join(' · '))}</div>
       ${h.note ? `<div class="note-line">📌 ${esc(h.note)}</div>` : ''}</a>`).join('')}</div>`;
+  const reload = (changed) => { if (changed) viewCustomer(handle); else { document.getElementById('newAddr').innerHTML = ''; viewCustomer(handle); } };
+  const lastZip = (live[0] || {}).zip || '';
+  document.getElementById('addAddr').onclick = () => {
+    document.getElementById('newAddr').innerHTML = `<div class="card">${addrFormHtml(null, c.addresses.some((a) => a.postal === lastZip) ? '' : lastZip)}</div>`;
+  };
+  $app.onclick = async (ev) => {
+    if (await addrFormClick(ev, c.handle, reload)) return;
+    const e = ev.target.closest('[data-edit]');
+    if (e) {
+      const a = c.addresses[Number(e.dataset.edit)];
+      e.closest('.card').innerHTML = addrFormHtml(a);
+    }
+  };
 }
 
 /* ----------------------------------------------------------------- notes */

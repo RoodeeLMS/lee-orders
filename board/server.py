@@ -11,6 +11,8 @@ Write side: SQLite /data/lee.db - things only Khun Lee can supply:
             * payment slips (images in /data/slips); attaching one ticks the order paid
             * round status set from the app (open / closed / delivered / cancelled), which
               overrides the synced status until the round def is updated to match
+            * address-book edits (add / change / delete one customer address); they live in
+              `addr_edits` and are applied ON TOP of the synced book, so a re-sync never loses them
             Every write is also appended to `events`, which `python server.py inbox` prints for
             the "check her reply" workflow.
 
@@ -37,6 +39,8 @@ HTTP :8080
   GET  /api/round/<id>/history   every event on the round, newest first
   GET  /api/system               when the system last read comments / synced / read Lee's replies
   GET  /api/analytics?range=all|90|365   sales, dishes, customers, areas, weekdays
+  POST /api/address {handle, postal, oldPostal?, name, phone, address, maps}   add / edit one address
+  POST /api/address/delete {handle, postal}
 CLI (run by Claude through Portainer exec; everything it writes is attributed to SYSTEM_USER)
   python server.py inbox [since_epoch] [--mark]   JSON of events + open notes; --mark logs inbox_read
   python server.py log <kind> <round|-> [json] [--at epoch]   e.g. kind scan / sync
@@ -83,6 +87,8 @@ def init_db():
             text TEXT, done INT DEFAULT 0, done_by TEXT, done_at INT, reply TEXT);
         CREATE TABLE IF NOT EXISTS slips(id INTEGER PRIMARY KEY, round_id TEXT, okey TEXT, file TEXT, sha TEXT,
             size INT, by TEXT, at INT);
+        CREATE TABLE IF NOT EXISTS addr_edits(handle TEXT, postal TEXT, name TEXT, phone TEXT, address TEXT,
+            maps TEXT, deleted INT DEFAULT 0, by TEXT, at INT, PRIMARY KEY(handle, postal));
         CREATE TABLE IF NOT EXISTS round_state(round_id TEXT PRIMARY KEY, status TEXT, by TEXT, at INT);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, at INT, by TEXT, kind TEXT, round_id TEXT,
             okey TEXT, ref TEXT, payload TEXT);
@@ -140,8 +146,37 @@ def round_data(rid):
     return load_json(os.path.join(SYNC, 'orders', rid + '.json'))
 
 
-def addrbook():
+def synced_addrbook():
     return load_json(os.path.join(SYNC, 'address-book.json')) or {'byUser': {}}
+
+
+_book = {'key': None, 'data': None, 'checked': 0.0}
+
+
+def addrbook():
+    """The synced book with the app's edits applied on top (cached until either side changes)."""
+    base = synced_addrbook()
+    if _book['data'] is not None and _book['key'][0] == id(base) and time.time() - _book['checked'] < 2:
+        return _book['data']        # a page builds hundreds of lookups; re-check the DB at most every 2 s
+    _book['checked'] = time.time()
+    with db() as c:
+        stamp = c.execute('SELECT COUNT(*), COALESCE(MAX(at), 0) FROM addr_edits').fetchone()
+        key = (id(base), tuple(stamp))
+        if _book['key'] == key and _book['data'] is not None:
+            return _book['data']
+        edits = [dict(r) for r in c.execute('SELECT * FROM addr_edits ORDER BY at')]
+    by = {h: {p: dict(v) for p, v in slots.items()} for h, slots in base.get('byUser', {}).items()}
+    for e in edits:
+        slots = by.setdefault(e['handle'], {})
+        if e['deleted']:
+            slots.pop(e['postal'], None)
+        else:
+            slots[e['postal']] = {'name': e['name'] or '', 'phone': e['phone'] or '', 'address': e['address'] or '',
+                                  'maps': e['maps'] or '', 'editedBy': e['by'], 'editedAt': e['at']}
+        if not slots:
+            by.pop(e['handle'], None)
+    _book.update(key=key, data={'byUser': by}, checked=time.time())
+    return _book['data']
 
 
 def norm_u(u):
@@ -337,7 +372,7 @@ def customer(handle):
                              'items': [[names.get(k, k), q] for k, q in o.get('items', {}).items() if q],
                              'food': item_total(o.get('items', {}), pr), 'note': o.get('note')})
     hist.sort(key=lambda x: x['round'], reverse=True)
-    addrs = [dict(v, postal=k) for k, v in addrbook().get('byUser', {}).get(h, {}).items()]
+    addrs = [dict(v, postal=k) for k, v in sorted(addrbook().get('byUser', {}).get(h, {}).items())]
     return {'handle': h, 'history': hist, 'addresses': addrs}
 
 
@@ -666,6 +701,32 @@ class H(BaseHTTPRequestHandler):
                                     (int(time.time()), by, rid, b.get('key') or None, text))
                     log_event(c, by, 'note', rid, b.get('key'), str(cur.lastrowid), {'text': text})
                     return self.send(200, {'ok': True, 'id': cur.lastrowid})
+                if path in ('/api/address', '/api/address/delete'):
+                    h = norm_u(b.get('handle'))
+                    postal = str(b.get('postal') or '').strip()
+                    if not re.fullmatch(r'[0-9a-z._]{1,40}', h) or not re.fullmatch(r'\d{5}', postal):
+                        return self.send(400, {'error': 'ต้องมีชื่อ IG และรหัสไปรษณีย์ 5 หลัก'})
+                    now = int(time.time())
+                    _book['data'] = None          # the next lookup rebuilds the merged book
+                    if path == '/api/address/delete':
+                        c.execute('INSERT OR REPLACE INTO addr_edits(handle,postal,deleted,by,at) VALUES(?,?,1,?,?)', (h, postal, by, now))
+                        log_event(c, by, 'addr_delete', None, None, h, {'handle': h, 'postal': postal})
+                        c.commit(); _book['data'] = None     # commit before replying: the app re-reads at once
+                        return self.send(200, {'ok': True})
+                    f = {k: str(b.get(k) or '').strip()[:500] for k in ('name', 'phone', 'address', 'maps')}
+                    if not (f['name'] or f['address']):
+                        return self.send(400, {'error': 'ใส่ชื่อหรือที่อยู่อย่างน้อยหนึ่งอย่าง'})
+                    if f['maps'] and not re.match(r'https?://', f['maps']):
+                        return self.send(400, {'error': 'ลิงก์ Maps ต้องขึ้นต้นด้วย http'})
+                    old = str(b.get('oldPostal') or '').strip()
+                    if old and old != postal and re.fullmatch(r'\d{5}', old):   # postcode changed: retire the old slot
+                        c.execute('INSERT OR REPLACE INTO addr_edits(handle,postal,deleted,by,at) VALUES(?,?,1,?,?)', (h, old, by, now))
+                    c.execute('INSERT OR REPLACE INTO addr_edits(handle,postal,name,phone,address,maps,deleted,by,at) VALUES(?,?,?,?,?,?,0,?,?)',
+                              (h, postal, f['name'], f['phone'], f['address'], f['maps'], by, now))
+                    log_event(c, by, 'addr_edit', None, None, h, {'handle': h, 'postal': postal, 'oldPostal': old or None,
+                                                                  'new': not old})
+                    c.commit(); _book['data'] = None
+                    return self.send(200, {'ok': True})
                 if path == '/api/round-status':
                     rid, status = b.get('round'), b.get('status')
                     d = round_data(rid)
@@ -786,6 +847,11 @@ if __name__ == '__main__':
             if at:
                 c.execute('UPDATE events SET at=? WHERE id=(SELECT MAX(id) FROM events)', (at,))
         print('logged')
+        sys.exit(0)
+    if argv and argv[0] == 'addr-edits':   # every address edit made in the app, as JSON
+        sys.stdout.reconfigure(encoding='utf-8')
+        with db() as c:
+            print(json.dumps([dict(r) for r in c.execute('SELECT * FROM addr_edits ORDER BY at')], ensure_ascii=False))
         sys.exit(0)
     if argv and argv[0] == 'note-done':    # note-done <id> [reply]
         with db() as c:

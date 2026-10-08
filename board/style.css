@@ -296,3 +296,11 @@ table.prep td.n { text-align: right; font-weight: 800; font-size: 20px; width: 9
 .pop-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 .pop-nav button { min-width: 110px; justify-content: center; }
 @media print { .modal { display: none !important; } }
+
+/* ---------- address editor ---------- */
+.addr-form { display: grid; gap: 8px; }
+.addr-form label { display: grid; gap: 3px; font-size: 13px; color: var(--muted); }
+.addr-form textarea { min-height: 70px; }
+.del-body .addr-form label { color: #4b5563; }
+.del-body .addr-form input, .del-body .addr-form textarea { background: #f8fafc; color: #1c1c1e; border-color: #d1d5db; }
+.addr-edit-btn { flex: 0 0 auto; border-radius: 12px; min-height: 46px; }
