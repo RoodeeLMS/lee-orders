@@ -116,17 +116,18 @@ const names = () => Object.fromEntries(R.menu.map((m) => [m.code, m.short || m.n
 const priceOf = (c) => (R.menu.find((m) => m.code === c) || {}).price || 0;
 const dateFull = () => (R.deliveryDateFull || R.deliveryDateLabel || '').split(' (')[0];
 
+// Item codes of an order in menu (display-column) order - the order the old site's slip uses.
+const itemCodes = (o) => R.displayColumns.concat(Object.keys(o.items).filter((c) => !R.displayColumns.includes(c))).filter((c) => o.items[c]);
 function itemsText(o, sep = ' · ') {
   const n = names();
-  const cols = R.displayColumns.concat(Object.keys(o.items).filter((c) => !R.displayColumns.includes(c)));
-  return cols.filter((c) => o.items[c]).map((c) => `${n[c] || c} ×${o.items[c]}`).join(sep);
+  return itemCodes(o).map((c) => `${n[c] || c} ×${o.items[c]}`).join(sep);
 }
 
 // Mirrors buildMessage() in the GitHub Pages site (assets/js/order.js).
 function customerMessage(o) {
   const n = names();
   const L = ['**' + (R.popupTitle || 'สรุปยอด'), '', 'จัดส่ง' + (R.deliveryDateFull || R.deliveryDateLabel || ''), ''];
-  for (const c of Object.keys(o.items).filter((c) => o.items[c])) L.push(`${n[c] || c} ×${o.items[c]}   ${fmt(o.items[c] * priceOf(c))} บาท`);
+  for (const c of itemCodes(o)) L.push(`${n[c] || c} ×${o.items[c]}   ${fmt(o.items[c] * priceOf(c))} บาท`);
   if (o.note) L.push(`หมายเหตุ: ${o.note}`);
   L.push(`ค่าส่ง ${fmt(o.fee)} บาท`, '', `รวมเป็นเงิน ${fmt(o.food + o.fee)} บาท`, '');
   const p = R.payment || {};
@@ -234,7 +235,9 @@ function tabOrders() {
     if (VIEW.filter === 'all') list = list.filter((o) => !o.cancelled).concat(list.filter((o) => o.cancelled));
     if (q) list = list.filter((o) => o.user.toLowerCase().includes(q) || (o.zip || '').includes(q) ||
       ((o.address || {}).name || '').toLowerCase().includes(q));
-    document.getElementById('list').innerHTML = sorted(list).map(orderCard).join('') || '<p class="empty">ไม่มีรายการ</p>';
+    const shown = sorted(list);
+    VIEW.listKeys = shown.map((o) => o.key);
+    document.getElementById('list').innerHTML = shown.map(orderCard).join('') || '<p class="empty">ไม่มีรายการ</p>';
   };
   const s = R.summary;
   el.innerHTML = `
@@ -269,9 +272,7 @@ const stamp = (o, f, via) => { o.acts = o.acts || {}; o.acts[f] = { by: ME.user,
 function orderCard(o) {
   const k = esc(o.key);
   const hint = hintOf(o.user);
-  const orig = o.editedFrom ? `<div class="orig">✏️ คุณหลีแก้จากเดิม: ${esc(o.editedFrom)}</div>`
-    : o.normalizedFrom ? `<div class="orig">📄 ข้อความเดิมของลูกค้า: ${esc(o.normalizedFrom)}</div>` : '';
-  return `<div class="card ord ${o.cancelled ? 'cancelled' : ''} ${o.paid ? 'paid' : ''} ${o.shipped ? 'shipped' : ''}" data-key="${k}">
+  return `<div class="card ord tap ${o.cancelled ? 'cancelled' : ''} ${o.paid ? 'paid' : ''} ${o.shipped ? 'shipped' : ''}" data-key="${k}">
     <div class="row"><span class="who-line">${o.caption ? '📌 ' : ''}@${esc(handleOf(o.user))}</span>
       <span class="pill">${esc(o.zip || 'ไม่มี ปณ.')}</span><span class="spacer"></span><span class="amt">${baht(o.food + o.fee)}</span></div>
     ${hint ? `<div class="lbl">${esc(hint)}</div>` : ''}
@@ -279,39 +280,211 @@ function orderCard(o) {
     ${o.note ? `<div class="note-line">📌 ${esc(o.note)}</div>` : ''}
     ${o.remark ? `<div class="remark">❓ ${esc(o.remark)}</div>` : ''}
     ${o.cancelled ? `<div class="remark">${o.movedTo ? '📦 ' + esc(o.movedTo) : '❌ ยกเลิก / ไม่นับยอด'}</div>` : `
-    <div class="checks noprint">
+    <div class="checks three noprint">
       <button data-act="paid" class="${o.paid ? 'on' : ''}">${o.paid ? '☑ จ่ายแล้ว' : '☐ จ่ายแล้ว'}</button>
       <button data-act="shipped" class="${o.shipped ? 'on' : ''}">${o.shipped ? '☑ ส่งแล้ว' : '☐ ส่งแล้ว'}</button>
+      <button data-act="open" class="openbtn">📋 สลิป${o.slips.length ? ` · 🧾${o.slips.length}` : ''}</button>
     </div>
-    ${actLine(o)}
-    <div class="sliprow noprint">
-      ${o.slips.map((s) => `<img class="slipthumb" src="/api/slip/${s.id}" data-slip="${s.id}" loading="lazy" alt="สลิป">`).join('')}
-      <button data-act="slip" class="${o.paid ? '' : 'slipbtn'}">📎 ${o.slips.length ? 'เพิ่มสลิป' : 'แนบสลิป'}</button>
-    </div>
-    <details class="noprint"><summary>▸ ส่งยอด · ที่อยู่ · ค่าส่ง · โน้ต</summary>
-      <div class="actions">
-        <button data-act="copymsg">📋 สรุปยอด</button>
-        ${o.paid ? '' : '<button data-act="copyrem">💬 ทวงยอด</button>'}
-        <button data-act="copydel">📋 คนส่ง</button>
-        ${callBtn(o)}${mapBtn(o)}
-      </div>
-      ${addrHtml(o)}
-      <details><summary class="sub">ดูข้อความสรุปยอดเต็ม</summary><div class="box">${esc(customerMessage(o))}</div></details>
-      <div class="feeRow"><span>ค่าส่ง</span><input type="number" inputmode="numeric" min="0" step="10" value="${o.fee}" data-fee>
-        <button data-act="fee">บันทึก</button><span class="sub">${esc(o.zone)}${o.fee !== o.feeAuto ? ' · ปกติ ' + o.feeAuto : ''}</span></div>
-      <textarea placeholder="ฝากโน้ตเรื่องออเดอร์นี้ เช่น ลูกค้าขอเปลี่ยน…" data-notetext></textarea>
-      <div class="row" style="margin-top:6px"><span class="spacer"></span><button data-act="note" class="primary">ส่งโน้ต</button></div>
-      ${orig}
-    </details>`}
+    ${actLine(o)}`}
   </div>`;
 }
 
-// Re-render one order card in place, keeping its detail panel open if it was.
-function redraw(card, o, forceOpen) {
-  const open = forceOpen || (card.querySelector('details') && card.querySelector('details').open);
-  card.outerHTML = orderCard(o);
-  if (open) document.querySelector(`[data-key="${CSS.escape(o.key)}"] details`).open = true;
+// Re-render one order card in place (if it is on screen) and refresh the round totals.
+function redraw(card, o) {
+  card = card || document.querySelector(`#tab [data-key="${CSS.escape(o.key)}"]`);
+  if (card && card.closest('#list')) card.outerHTML = orderCard(o);
+  else if (card && document.querySelector('#tab .shipgrid')) tabShip();
   refreshStats();
+}
+
+/* --------------------------------------------------- slip popup (old-site style) */
+// The screenshot-ready message card: same layout as the GitHub Pages popup Khun Lee is used to.
+function msgCardHtml(o) {
+  const n = names();
+  const p = R.payment || {};
+  return `
+    <div class="m-title">**${esc(R.popupTitle || 'สรุปยอด')}</div>
+    <div class="m-date">จัดส่ง${esc(R.deliveryDateFull || R.deliveryDateLabel || '')}</div>
+    <div class="m-items">${itemCodes(o).map((c) => `<div class="m-row"><span>${esc(n[c] || c)} <span class="m-qty">×${o.items[c]}</span></span><span class="m-amt">${fmt(o.items[c] * priceOf(c))} บาท</span></div>`).join('')}
+      ${o.note ? `<div class="m-note">หมายเหตุ: ${esc(o.note)}</div>` : ''}
+      <div class="m-row m-ship"><span>ค่าส่ง</span><span class="m-amt">${fmt(o.fee)} บาท</span></div>
+    </div>
+    <div class="m-total"><span>รวมเป็นเงิน</span><span>${fmt(o.food + o.fee)} บาท</span></div>
+    <div class="m-pay"><div>Payment :</div><div>${esc(p.name || '')}</div><div class="m-acct">${esc(((p.bank || '') + ' ' + (p.account || '')).trim())}</div></div>
+    <div class="m-foot"><div>หลังจากโอนเงินแล้ว</div><div>รบกวนส่งหลักฐานการโอนเงินให้หลีด้วยนะคะ</div><div class="m-thanks">ขอบคุณค่ะ 😊</div></div>`;
+}
+
+function courierHtml(o) {
+  const a = o.address;
+  return `<div class="del-line1">@${esc(handleOf(o.user))} &nbsp; ${esc(itemsText(o))}</div>
+    <div class="del-amt">ยอดสินค้า ${fmt(o.food)} + ค่าส่ง ${fmt(o.fee)} = <b>รวม ${fmt(o.food + o.fee)} บาท</b></div>
+    ${a ? `${a.name ? `<div class="del-name">${esc(a.name)}${a.phone ? ` · <a href="tel:${esc(a.phone.replace(/[^\d+]/g, ''))}">${esc(a.phone)}</a>` : ''}</div>` : ''}
+      ${a.address ? `<div class="del-addr">${esc(a.address)}${a.postal && !a.address.includes(a.postal) ? ' ' + esc(a.postal) : ''}</div>` : ''}
+      ${a.maps ? `<div class="del-maps"><a href="${esc(a.maps)}" target="_blank" rel="noopener">📍 เปิดพิกัด Maps ↗</a></div>` : ''}
+      ${a.ambiguous ? `<div class="del-warn">⚠️ ลูกค้ามีหลายที่อยู่ — ตรวจ ปณ. ให้ตรงก่อนส่ง</div>` : ''}`
+    : `<div class="del-warn">ไม่พบที่อยู่ในสมุด (ปณ. ${esc(o.zip || '-')}) — ต้องตามเก็บที่อยู่จากลูกค้า</div>`}`;
+}
+
+function popupBody(o) {
+  const keys = VIEW.listKeys || [];
+  const i = keys.indexOf(o.key);
+  const shown = (s2) => esc(s2);
+  return `
+    <div class="modal-head">
+      <div style="min-width:0"><strong>@${esc(handleOf(o.user))}</strong> <span class="muted">· ปณ. ${esc(o.zip || '-')}</span>
+        ${hintOf(o.user) ? `<div class="sub">${shown(hintOf(o.user))}</div>` : ''}</div>
+      <button class="modal-x" data-pop="close" title="ปิด">✕</button>
+    </div>
+    ${o.cancelled ? `<div class="remark" style="margin-bottom:10px">${o.movedTo ? '📦 ' + esc(o.movedTo) : '❌ ออเดอร์นี้ยกเลิก / ไม่นับยอด'}</div>` : ''}
+    <div class="msg-card">${msgCardHtml(o)}</div>
+    <div class="modal-controls">
+      <label class="ship-field">ค่าส่ง (บาท) <span class="ship-zone">· ${esc(o.zone)}${o.fee !== o.feeAuto ? ` · ปกติ ${o.feeAuto}` : ''}</span>
+        <input type="number" inputmode="numeric" min="0" step="10" value="${o.fee}" data-pop="fee"></label>
+      <button class="btn-copy" data-pop="copymsg">📋 คัดลอกข้อความ</button>
+    </div>
+    <p class="copy-msg" data-pop="copied"></p>
+    ${o.cancelled ? '' : `
+    <div class="pop-status">
+      <div class="checks">
+        <button data-pop="paid" class="${o.paid ? 'on' : ''}">${o.paid ? '☑ จ่ายแล้ว' : '☐ จ่ายแล้ว'}</button>
+        <button data-pop="shipped" class="${o.shipped ? 'on' : ''}">${o.shipped ? '☑ ส่งแล้ว' : '☐ ส่งแล้ว'}</button>
+      </div>
+      <div class="sliprow">
+        ${o.slips.map((x) => `<img class="slipthumb" src="/api/slip/${x.id}" data-slip="${x.id}" loading="lazy" alt="สลิป">`).join('')}
+        <button data-pop="slip" class="${o.paid ? '' : 'slipbtn'}">📎 ${o.slips.length ? 'เพิ่มสลิป' : 'แนบสลิป'}</button>
+        ${o.paid ? '' : '<button data-pop="copyrem">💬 ทวงยอด</button>'}
+      </div>
+      ${actLine(o)}
+    </div>`}
+    <div class="del-card">
+      <div class="del-head">📦 สำหรับคนส่งของ <span class="del-sub">(order + ที่อยู่จากสมุด)</span></div>
+      <div class="del-body">${courierHtml(o)}</div>
+      <button class="btn-copy btn-copy-del" data-pop="copydel">📋 คัดลอกสำหรับคนส่งของ</button>
+    </div>
+    <div class="verify-card">
+      <div class="verify-label">🔎 คอมเมนต์ต้นฉบับ (สำหรับยืนยัน — ไม่ต้องส่งลูกค้า)</div>
+      <div class="ig-comment"><div class="ig-ava">${esc((handleOf(o.user) || '?')[0].toUpperCase())}</div>
+        <div class="ig-body"><div class="ig-user">${esc(handleOf(o.user))}</div><div class="ig-text">${o.comment ? esc(o.comment) : '<span class="muted">— ไม่มีข้อความต้นฉบับ —</span>'}</div></div></div>
+      <div class="verify-parsed">ระบบอ่านได้: ${esc(itemsText(o))}</div>
+      ${o.editedFrom ? `<div class="verify-edited">✏️ <b>คุณหลีแก้ออเดอร์นี้</b> — ของเดิมก่อนแก้: ${esc(o.editedFrom)}</div>` : ''}
+      ${o.normalizedFrom ? `<div class="verify-edited">📄 <b>ข้อความเดิมของลูกค้า</b> (ระบบจัดรูปแบบให้อ่านง่าย — ไม่ใช่คุณหลีแก้): ${esc(o.normalizedFrom)}</div>` : ''}
+      ${o.remark ? `<div class="remark" style="margin-top:8px">❓ ข้อความที่ระบบไม่เข้าใจ: <b>${esc(o.remark)}</b> — รอคุณหลียืนยัน</div>` : ''}
+      ${R.source && R.source.url ? `<a class="verify-link" href="${esc(R.source.url)}" target="_blank" rel="noopener">เปิดโพสต์ต้นฉบับบน Instagram ↗</a>` : ''}
+    </div>
+    <div class="pop-note">
+      <textarea placeholder="ฝากโน้ตเรื่องออเดอร์นี้ เช่น ลูกค้าขอเปลี่ยน…" data-pop="notetext"></textarea>
+      <div class="row" style="margin-top:6px"><span class="spacer"></span><button class="primary" data-pop="note">ส่งโน้ต</button></div>
+    </div>
+    ${keys.length > 1 && i >= 0 ? `<div class="pop-nav">
+      <button data-pop="prev" ${i === 0 ? 'disabled' : ''}>‹ ก่อนหน้า</button>
+      <span class="sub">${i + 1} / ${keys.length}</span>
+      <button data-pop="next" ${i === keys.length - 1 ? 'disabled' : ''}>ถัดไป ›</button></div>` : ''}`;
+}
+
+let POP = null;   // { el, o } while the slip popup is open
+function openPopup(o) {
+  if (!POP) {
+    const el = document.createElement('div');
+    el.className = 'modal';
+    el.innerHTML = '<div class="modal-box" role="dialog" aria-modal="true"></div>';
+    document.body.appendChild(el);
+    document.body.style.overflow = 'hidden';
+    el.addEventListener('click', onPopClick);
+    el.addEventListener('input', onPopInput);
+    el.addEventListener('change', onPopChange);
+    document.addEventListener('keydown', onPopKey);
+    POP = { el, o };
+  }
+  POP.o = o;
+  POP.el.querySelector('.modal-box').innerHTML = popupBody(o);
+  POP.el.scrollTop = 0;
+}
+function closePopup() {
+  if (!POP) return;
+  POP.el.remove(); POP = null;
+  document.body.style.overflow = '';
+  document.removeEventListener('keydown', onPopKey);
+}
+function popStep(d) {
+  const keys = VIEW.listKeys || [];
+  const k = keys[keys.indexOf(POP.o.key) + d];
+  const o = k && R.orders.find((x) => x.key === k);
+  if (o) openPopup(o);
+}
+const repaintPopup = () => { if (POP) openPopup(POP.o); };
+function onPopKey(e) {
+  if (!POP || /INPUT|TEXTAREA/.test((e.target || {}).tagName || '')) return;
+  if (e.key === 'Escape') closePopup();
+  if (e.key === 'ArrowLeft') popStep(-1);
+  if (e.key === 'ArrowRight') popStep(1);
+}
+function onPopInput(e) {   // live preview while typing the fee, like the old site
+  if (e.target.dataset.pop !== 'fee') return;
+  const o = POP.o;
+  const v = e.target.value === '' ? o.feeAuto : Number(e.target.value) || 0;
+  const tmp = { ...o, fee: v };
+  POP.el.querySelector('.msg-card').innerHTML = msgCardHtml(tmp);
+  POP.el.querySelector('.del-body').innerHTML = courierHtml(tmp);
+}
+async function onPopChange(e) {   // save the fee when the field is left / Enter
+  if (e.target.dataset.pop !== 'fee') return;
+  const o = POP.o;
+  const raw = e.target.value;
+  const v = raw === '' ? null : Math.max(0, Number(raw) || 0);
+  if ((v === null ? o.feeAuto : v) === o.fee) return;
+  try {
+    await api('/api/status', { round: R.id, key: o.key, fee: v });
+    o.fee = v === null ? o.feeAuto : v; stamp(o, 'fee'); toast('บันทึกค่าส่งแล้ว ✓');
+    redraw(null, o); repaintPopup();
+  } catch (err) { toast('ไม่สำเร็จ: ' + err.message); }
+}
+async function popCopy(text, label) {
+  const m = POP.el.querySelector('[data-pop="copied"]');
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  if (m) { m.textContent = label; m.className = 'copy-msg ok'; }
+  toast(label);
+}
+async function onPopClick(e) {
+  if (e.target === POP.el) return closePopup();
+  const th = e.target.closest('[data-slip]');
+  if (th) return openSlip(POP.o, Number(th.dataset.slip));
+  const b = e.target.closest('[data-pop]');
+  if (!b || b.tagName === 'INPUT' || b.tagName === 'TEXTAREA') return;
+  const o = POP.o;
+  const act = b.dataset.pop;
+  try {
+    if (act === 'close') return closePopup();
+    if (act === 'prev') return popStep(-1);
+    if (act === 'next') return popStep(1);
+    if (act === 'copymsg') return popCopy(customerMessage(o), 'คัดลอกข้อความแล้ว ✓');
+    if (act === 'copyrem') return popCopy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓');
+    if (act === 'copydel') return popCopy(deliveryText(o), o.address ? 'คัดลอกข้อความคนส่งแล้ว ✓' : 'คัดลอกแล้ว ✓ (ยังไม่มีที่อยู่ในสมุด)');
+    if (act === 'slip') {
+      const file = await pickFile();
+      if (!file) return;
+      b.disabled = true;
+      await uploadSlip(o, file);
+      redraw(null, o); return repaintPopup();
+    }
+    if (act === 'paid' || act === 'shipped') {
+      const v = !o[act];
+      b.disabled = true;
+      await api('/api/status', { round: R.id, key: o.key, [act]: v });
+      o[act] = v; stamp(o, act); toast(v ? (act === 'paid' ? 'บันทึก จ่ายแล้ว ✓' : 'บันทึก ส่งแล้ว ✓') : 'เอาเครื่องหมายออกแล้ว');
+      redraw(null, o); return repaintPopup();
+    }
+    if (act === 'note') {
+      const ta = POP.el.querySelector('[data-pop="notetext"]');
+      const t = ta.value.trim();
+      if (!t) return toast('พิมพ์ข้อความก่อนนะคะ');
+      await api('/api/note', { round: R.id, key: o.key, text: t });
+      ta.value = ''; toast('ส่งโน้ตแล้ว ✓');
+    }
+  } catch (err) { toast('ไม่สำเร็จ: ' + err.message); b.disabled = false; }
 }
 
 /* ------------------------------------------------------------ payment slips */
@@ -377,24 +550,13 @@ function openSlip(o, id) {
 }
 
 async function onOrderClick(ev) {
-  const th = ev.target.closest('[data-slip]');
-  if (th) {
-    const o = R.orders.find((x) => x.key === th.closest('[data-key]').dataset.key);
-    return openSlip(o, Number(th.dataset.slip));
-  }
-  const b = ev.target.closest('[data-act]');
-  if (!b) return;
-  const card = b.closest('[data-key]');
+  const card = ev.target.closest('[data-key]');
+  if (!card || ev.target.closest('a, input, textarea, select')) return;
   const o = R.orders.find((x) => x.key === card.dataset.key);
+  const b = ev.target.closest('[data-act]');
+  if (!b || b.dataset.act === 'open') return openPopup(o);
   const act = b.dataset.act;
   try {
-    if (act === 'slip') {
-      const file = await pickFile();
-      if (!file) return;
-      b.disabled = true;
-      await uploadSlip(o, file);
-      return redraw(document.querySelector(`[data-key="${CSS.escape(o.key)}"]`), o);
-    }
     if (act === 'paid' || act === 'shipped') {
       const v = !o[act];
       b.disabled = true;
@@ -402,21 +564,7 @@ async function onOrderClick(ev) {
       o[act] = v; stamp(o, act); toast(v ? (act === 'paid' ? 'บันทึก จ่ายแล้ว ✓' : 'บันทึก ส่งแล้ว ✓') : 'เอาเครื่องหมายออกแล้ว');
       return redraw(card, o);
     }
-    if (act === 'copymsg') return copy(customerMessage(o), 'คัดลอกสรุปยอดแล้ว ✓');
-    if (act === 'copyrem') return copy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓');
     if (act === 'copydel') return copy(deliveryText(o), 'คัดลอกสำหรับคนส่งแล้ว ✓');
-    if (act === 'fee') {
-      const v = card.querySelector('[data-fee]').value;
-      await api('/api/status', { round: R.id, key: o.key, fee: v === '' ? null : Number(v) });
-      o.fee = v === '' ? o.feeAuto : Number(v); stamp(o, 'fee'); toast('บันทึกค่าส่งแล้ว ✓');
-      return redraw(card, o, true);
-    }
-    if (act === 'note') {
-      const t = card.querySelector('[data-notetext]').value.trim();
-      if (!t) return toast('พิมพ์ข้อความก่อนนะคะ');
-      await api('/api/note', { round: R.id, key: o.key, text: t });
-      card.querySelector('[data-notetext]').value = ''; toast('ส่งโน้ตแล้ว ✓');
-    }
   } catch (e) { toast('ไม่สำเร็จ: ' + e.message); b.disabled = false; }
 }
 
@@ -495,7 +643,7 @@ function tabShip() {
     </div>
     ${missing ? `<p class="remark">⚠️ ไม่พบที่อยู่ในสมุด ${missing} ราย — ต้องตามเก็บที่อยู่</p>` : ''}
     <div class="sub" style="margin-bottom:8px">เรียงตาม ปณ. · ${list.length} ราย</div>
-    <div class="grid">${list.map((o) => `<div class="card ord ${o.shipped ? 'shipped' : ''}" data-key="${esc(o.key)}">
+    <div class="grid shipgrid">${list.map((o) => `<div class="card ord tap ${o.shipped ? 'shipped' : ''}" data-key="${esc(o.key)}">
       <div class="row"><span class="who-line">@${esc(handleOf(o.user))}</span><span class="pill">${esc(o.zip || '-')}</span><span class="spacer"></span><span class="amt">${baht(o.food + o.fee)}</span></div>
       <div class="items">${esc(itemsText(o))}</div>
       ${o.note ? `<div class="note-line">📌 ${esc(o.note)}</div>` : ''}
@@ -505,10 +653,13 @@ function tabShip() {
     </div>`).join('')}</div>`;
   el.querySelector('[data-all]').onclick = () => copy(list.map(deliveryText).join('\n\n— — —\n\n'), `คัดลอก ${list.length} รายแล้ว ✓`);
   el.querySelector('[data-hide]').onclick = () => { VIEW.hideShipped = !VIEW.hideShipped; tabShip(); };
+  VIEW.listKeys = list.map((o) => o.key);
   el.onclick = async (ev) => {
+    const card = ev.target.closest('[data-key]');
+    if (!card || ev.target.closest('a, input, textarea, select')) return;
+    const o = R.orders.find((x) => x.key === card.dataset.key);
     const b = ev.target.closest('[data-act]');
-    if (!b) return;
-    const o = R.orders.find((x) => x.key === b.closest('[data-key]').dataset.key);
+    if (!b) return openPopup(o);
     if (b.dataset.act === 'copydel') return copy(deliveryText(o), 'คัดลอกสำหรับคนส่งแล้ว ✓');
     if (b.dataset.act === 'shipped') {
       try {

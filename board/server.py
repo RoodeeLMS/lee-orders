@@ -260,7 +260,7 @@ def round_view(rid):
         'deliveryDateLabel': d.get('deliveryDateLabel'), 'deliveryDateFull': d.get('deliveryDateFull'),
         'popupTitle': d.get('popupTitle'), 'payment': d.get('payment', {}),
         'menu': d.get('menu', []), 'displayColumns': d.get('displayColumns') or [m['code'] for m in d.get('menu', [])],
-        'parsedAt': d.get('parsedAt'), 'orders': orders, 'questions': qs, 'notes': notes,
+        'parsedAt': d.get('parsedAt'), 'source': d.get('source'), 'orders': orders, 'questions': qs, 'notes': notes,
         'prep': prep, 'roundNotes': d.get('notes', []),
         'summary': summarize(orders, qs, notes),
     }

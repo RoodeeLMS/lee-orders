@@ -3,8 +3,8 @@
   "short_name": "ครัวคุณหลี",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#f6f4ef",
-  "theme_color": "#c2410c",
+  "background_color": "#14130f",
+  "theme_color": "#14130f",
   "icons": [
     { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
