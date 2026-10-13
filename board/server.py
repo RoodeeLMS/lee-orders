@@ -45,6 +45,8 @@ HTTP :8080
   POST /api/address {handle, id?, postal, name, phone, address, maps, round?, key?}   add (no id) / edit;
                      with round+key the new address is also chosen for that order
   GET  /api/addresses/<handle>  one customer's addresses (with ids)
+  POST /api/usage {action, round?, key?}   light activity log (app opened, slip opened, message copied)
+  GET  /api/usage-summary        admins: who uses the app, how often (last 7 / 30 days, per day)
   POST /api/address/delete {handle, id}
   POST /api/status   ... addr: <address id> | null   ships this order to that address
 CLI (run by Claude through Portainer exec; everything it writes is attributed to SYSTEM_USER)
@@ -61,6 +63,7 @@ DB = os.path.join(DATA, 'lee.db')
 SLIPS = os.path.join(DATA, 'slips')
 SLIP_MAX = 8 * 1024 * 1024
 ROUND_STATUSES = ('open', 'closed', 'delivered', 'cancelled')
+USAGE_ACTIONS = ('app_open', 'slip_open', 'copy_msg', 'copy_courier', 'copy_reminder')
 SYSTEM_USER = 'claude'   # no Authelia account has this name, so the web side can never act as it
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -97,6 +100,8 @@ def init_db():
             address TEXT, maps TEXT, deleted INT DEFAULT 0, by TEXT, at INT, PRIMARY KEY(handle, sid));
         CREATE TABLE IF NOT EXISTS addr_edits(handle TEXT, postal TEXT, name TEXT, phone TEXT, address TEXT,
             maps TEXT, deleted INT DEFAULT 0, by TEXT, at INT, PRIMARY KEY(handle, postal));
+        CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY, at INT, by TEXT, action TEXT, round_id TEXT, okey TEXT);
+        CREATE INDEX IF NOT EXISTS usage_by_at ON usage(by, at);
         CREATE TABLE IF NOT EXISTS round_state(round_id TEXT PRIMARY KEY, status TEXT, by TEXT, at INT);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, at INT, by TEXT, kind TEXT, round_id TEXT,
             okey TEXT, ref TEXT, payload TEXT);
@@ -660,6 +665,10 @@ class H(BaseHTTPRequestHandler):
             if path == '/api/analytics':
                 rng = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('range') or ['all'])[0]
                 return self.send(200, analytics(rng if rng in ('all', '90', '365', '30') else 'all'))
+            if path == '/api/usage-summary':
+                if 'admins' not in self.who()['groups']:
+                    return self.send(403, {'error': 'admins only'})
+                return self.send(200, usage_summary())
             if path == '/api/system':
                 return self.send(200, system_info())
             m = re.fullmatch(r'/api/round/([^/]+)', path)
@@ -785,6 +794,13 @@ class H(BaseHTTPRequestHandler):
                         log_event(c, by, 'status', rid, k, payload={'addr': sid})
                     c.commit(); _book['data'] = None
                     return self.send(200, {'ok': True, 'id': sid})
+                if path == '/api/usage':
+                    act = b.get('action')
+                    if act not in USAGE_ACTIONS:
+                        return self.send(400, {'error': 'bad action'})
+                    c.execute('INSERT INTO usage(at,by,action,round_id,okey) VALUES(?,?,?,?,?)',
+                              (int(time.time()), by, act, (b.get('round') or None), (str(b.get('key'))[:200] if b.get('key') else None)))
+                    return self.send(200, {'ok': True})
                 if path == '/api/round-status':
                     rid, status = b.get('round'), b.get('status')
                     d = round_data(rid)
@@ -865,6 +881,30 @@ def note_done(c, nid, by, reply):
     return True
 
 
+def usage_summary():
+    """Per person: activity in the last 7 and 30 days (usage log + real edits from the event log),
+    last seen, and a per-day count for the last 14 days - enough to tell whether the app is in use."""
+    now = int(time.time())
+    d7, d30, d14 = now - 7 * 86400, now - 30 * 86400, now - 14 * 86400
+    people = {}
+    with db() as c:
+        rows = [dict(r) for r in c.execute('SELECT at, by, action FROM usage WHERE at>?', (d30,))]
+        rows += [{'at': r['at'], 'by': r['by'], 'action': r['kind']} for r in c.execute(
+            "SELECT at, by, kind FROM events WHERE at>? AND kind IN ('status','slip','answer','note','addr_edit','addr_delete','round_status')", (d30,))]
+    for r in rows:
+        if r['by'] in (SYSTEM_USER, '', None):
+            continue
+        p = people.setdefault(r['by'], {'user': r['by'], 'last': 0, 'd7': {}, 'd30': {}, 'days': {}})
+        p['last'] = max(p['last'], r['at'])
+        p['d30'][r['action']] = p['d30'].get(r['action'], 0) + 1
+        if r['at'] > d7:
+            p['d7'][r['action']] = p['d7'].get(r['action'], 0) + 1
+        if r['at'] > d14:
+            day = datetime.datetime.fromtimestamp(r['at'], TH).strftime('%Y-%m-%d')
+            p['days'][day] = p['days'].get(day, 0) + 1
+    return sorted(people.values(), key=lambda p: -p['last'])
+
+
 def system_info():
     with db() as c:
         def last(kind, where='', args=()):
@@ -882,9 +922,10 @@ def inbox(since, mark=False):
             log_event(c, SYSTEM_USER, 'inbox_read')
         ev = [dict(r) for r in c.execute('SELECT * FROM events WHERE at>? ORDER BY id', (since,))]
         open_notes = [dict(r) for r in c.execute('SELECT * FROM notes WHERE done=0 ORDER BY id')]
+        usage = [dict(r) for r in c.execute('SELECT by, action, COUNT(*) AS n, MAX(at) AS last FROM usage WHERE at>? GROUP BY by, action ORDER BY by, action', (since,))]
     for e in ev:
         e['payload'] = json.loads(e['payload']) if e['payload'] else None
-    print(json.dumps({'now': int(time.time()), 'events': ev, 'openNotes': open_notes}, ensure_ascii=False))
+    print(json.dumps({'now': int(time.time()), 'events': ev, 'openNotes': open_notes, 'usage': usage}, ensure_ascii=False))
 
 
 if __name__ == '__main__':

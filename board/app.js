@@ -20,6 +20,15 @@ async function api(path, body) {
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || ('HTTP ' + r.status));
   return r.json();
 }
+// Light activity log (app opened / slip opened / message copied) so we can tell whether the app is
+// really in use before retiring the old site. Fire-and-forget: never blocks or breaks the UI.
+function track(action, round, key) {
+  try {
+    fetch('/api/usage', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, round: round || null, key: key || null }) }).catch(() => {});
+  } catch (e) { /* ignore */ }
+}
+
 function toast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.hidden = false;
@@ -411,6 +420,7 @@ async function refreshRound() {
   if (tab === 'orders') tabOrders(); else if (tab === 'ship') tabShip();
 }
 function openPopup(o) {
+  if (!POP || POP.o.key !== o.key) track('slip_open', R && R.id, o.key);
   if (!POP) {
     const el = document.createElement('div');
     el.className = 'modal';
@@ -510,8 +520,9 @@ async function onPopClick(e) {
     if (act === 'close') return closePopup();
     if (act === 'prev') return popStep(-1);
     if (act === 'next') return popStep(1);
-    if (act === 'copymsg') return popCopy(customerMessage(o), 'คัดลอกข้อความแล้ว ✓');
-    if (act === 'copyrem') return popCopy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓');
+    if (act === 'copymsg') { track('copy_msg', R.id, o.key); return popCopy(customerMessage(o), 'คัดลอกข้อความแล้ว ✓'); }
+    if (act === 'copyrem') { track('copy_reminder', R.id, o.key); return popCopy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓'); }
+    if (act === 'copydel') track('copy_courier', R.id, o.key);
     if (act === 'copydel') return popCopy(deliveryText(o), o.address ? 'คัดลอกข้อความคนส่งแล้ว ✓' : 'คัดลอกแล้ว ✓ (ยังไม่มีที่อยู่ในสมุด)');
     if (act === 'editaddr') {   // edit the address this order currently ships to
       POP.el.querySelector('.del-body').innerHTML = addrFormHtml(o.address, o.zip);
@@ -972,6 +983,27 @@ function timingCards(a) {
         <p class="sub" style="margin:8px 0 0">ตัวเลข = ออเดอร์เฉลี่ยต่อรอบ · เมนูแต่ละรอบต่างกัน ใช้ดูแนวโน้มคร่าวๆ</p></div>`;
 }
 
+const USAGE_LABEL = { app_open: 'เปิดแอป', slip_open: 'เปิดสลิป', copy_msg: 'คัดลอกข้อความ', copy_courier: 'คัดลอกคนส่ง',
+  copy_reminder: 'คัดลอกทวงยอด', status: 'ติ๊กจ่าย/ส่ง/ค่าส่ง', slip: 'แนบสลิป', answer: 'ตอบคำถาม', note: 'ฝากโน้ต',
+  addr_edit: 'แก้ที่อยู่', addr_delete: 'ลบที่อยู่', round_status: 'เปลี่ยนสถานะรอบ' };
+async function usageCard() {
+  if (!isAdmin()) return '';
+  let rows;
+  try { rows = await api('/api/usage-summary'); } catch (e) { return ''; }
+  const days = [...Array(14)].map((_, i) => { const d = new Date(Date.now() - (13 - i) * 86400000); return d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Bangkok' }); });
+  const person = (p) => {
+    const mx = Math.max(1, ...days.map((d) => p.days[d] || 0));
+    const list = Object.entries(p.d7).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${USAGE_LABEL[k] || k} ${n}`).join(' · ');
+    return `<div class="use-row"><div class="row"><b>${esc(whoName(p.user))}</b><span class="spacer"></span><span class="sub">ล่าสุด ${when(p.last)}</span></div>
+      <div class="sub">7 วัน: ${list || 'ไม่มี'}</div>
+      <div class="hours" style="height:44px;margin-top:6px">${days.map((d) => `<div class="hcol" title="${d} · ${p.days[d] || 0}"><div class="hbar" style="height:${p.days[d] ? Math.max(8, Math.round(100 * p.days[d] / mx)) : 0}%"></div></div>`).join('')}</div>
+      <div class="row sub" style="justify-content:space-between"><span>14 วันก่อน</span><span>วันนี้</span></div></div>`;
+  };
+  return `<div class="card"><h3>📱 การใช้งานแอป (เฉพาะแอดมินเห็น)</h3>
+    ${rows.length ? rows.map(person).join('') : '<div class="sub">ยังไม่มีใครใช้งานใน 30 วัน</div>'}
+    <p class="sub" style="margin:8px 0 0">นับ: เปิดแอป · เปิดสลิป · คัดลอก · ติ๊ก · แนบสลิป · ตอบคำถาม · โน้ต · แก้ที่อยู่ — ใช้ดูว่าพร้อมปิดเว็บเดิมหรือยัง</p></div>`;
+}
+
 async function viewStats() {
   R = null;
   const rng = store.get('lee.statsRange', 'all');
@@ -995,6 +1027,7 @@ async function viewStats() {
       ${kpi(kfmt(t.fees), 'ค่าส่งรวม')}${kpi(fmt(t.rounds), 'รอบ')}
     </div>
     <div class="grid stats-grid">
+      ${await usageCard()}
       ${pend.length ? `<div class="card"><h3>💰 การเก็บเงินรอบที่ยังไม่ส่ง</h3>
         ${pend.map((r) => barRow(esc(r.label), r.paidAmt, r.paidAmt + r.dueAmt, `${Math.round(100 * r.paidAmt / ((r.paidAmt + r.dueAmt) || 1))}%`,
           `เก็บแล้ว ${baht(r.paidAmt)} · ค้าง ${baht(r.dueAmt)}`, `#/r/${encodeURIComponent(r.id)}`, 'ok')).join('')}</div>` : ''}
@@ -1041,6 +1074,7 @@ async function viewStats() {
 /* ------------------------------------------------------------------ boot */
 (async () => {
   try { ME = await api('/api/me'); } catch (e) { /* stays anonymous */ }
+  track('app_open');
   document.getElementById('who').textContent = ME.name ? 'สวัสดี ' + ME.name : '';
   try {
     const open = (await api('/api/notes')).filter((n) => !n.done).length;
