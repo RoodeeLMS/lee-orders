@@ -200,7 +200,7 @@ async function viewRound(id, tab) {
       <div class="stat"><b>${s.paid}/${s.orders}</b><span>จ่ายแล้ว</span></div>
       <div class="stat"><b>${s.shipped}/${s.orders}</b><span>ส่งแล้ว</span></div>
     </div>
-    <div class="sub">${s.orders} ออเดอร์${s.cancelled ? ` (+${s.cancelled} ยกเลิก)` : ''} · อาหาร ${baht(s.food)} · ค่าส่ง ${baht(s.fees)} · <span id="slipCount">สลิป ${s.slips}</span></div>
+    <div class="sub">${s.orders} ออเดอร์${s.cancelled ? ` (+${s.cancelled} ยกเลิก)` : ''} · อาหาร ${baht(s.food)} · ค่าส่ง ${baht(s.fees)} · <span id="slipCount">สลิป ${s.slips}</span>${s.captionOrders ? ` · 📌 แคปชั่น ${s.captionOrders} (${baht(s.captionFood)} แยก ไม่นับยอดรวม)` : ''}</div>
     <p class="fresh">${R.lastScan ? scanLine(R.lastScan) : R.parsedAt ? `ข้อมูลออเดอร์อัปเดต ${esc(whenIso(R.parsedAt))}` : ''}</p>
     <details class="rstat noprint"><summary>⚙️ สถานะรอบ: <b>${STATUS_LABEL[R.status] || esc(R.status)}</b>${R.statusSetBy ? ` <span class="sub">(ตั้งโดย ${esc(whoName(R.statusSetBy.by))} ${when(R.statusSetBy.at)})</span>` : ''} ▸</summary>
       <div class="chips" style="margin:8px 0">${Object.keys(STATUS_LABEL).map((k) => `<button data-rs="${k}" class="${R.status === k ? 'on' : ''}">${STATUS_LABEL[k]}</button>`).join('')}</div>
@@ -238,7 +238,7 @@ function tabOrders() {
   const el = document.getElementById('tab');
   const draw = () => {
     const q = (document.getElementById('q').value || '').toLowerCase().trim();
-    let list = R.orders;
+    let list = R.orders.filter((o) => !o.caption);
     if (VIEW.filter === 'due') list = list.filter((o) => !o.cancelled && !o.paid);
     if (VIEW.filter === 'unshipped') list = list.filter((o) => !o.cancelled && !o.shipped);
     if (VIEW.filter === 'cancelled') list = list.filter((o) => o.cancelled);
@@ -246,8 +246,14 @@ function tabOrders() {
     if (q) list = list.filter((o) => o.user.toLowerCase().includes(q) || (o.zip || '').includes(q) ||
       ((o.address || {}).name || '').toLowerCase().includes(q));
     const shown = sorted(list);
-    VIEW.listKeys = shown.map((o) => o.key);
+    let cap = R.orders.filter((o) => o.caption && !o.cancelled);
+    if (q) cap = cap.filter((o) => o.user.toLowerCase().includes(q) || (o.zip || '').includes(q));
+    if (VIEW.filter !== 'all' && VIEW.filter !== 'cancelled') cap = cap.filter((o) => VIEW.filter === 'due' ? !o.paid : !o.shipped);
+    if (VIEW.filter === 'cancelled') cap = [];
+    VIEW.listKeys = shown.concat(cap).map((o) => o.key);
     document.getElementById('list').innerHTML = shown.map(orderCard).join('') || '<p class="empty">ไม่มีรายการ</p>';
+    document.getElementById('caplist').innerHTML = cap.length ? `<h2>📌 ออเดอร์ในแคปชั่น (${cap.length}) · ${baht(cap.reduce((t, o) => t + o.food, 0))} <span class="sub">— แยกไว้ ไม่นับยอดรวม</span></h2>
+      <div class="grid">${cap.map(orderCard).join('')}</div>` : '';
   };
   const s = R.summary;
   el.innerHTML = `
@@ -262,7 +268,8 @@ function tabOrders() {
           .map(([k, l]) => `<option value="${k}" ${VIEW.sort === k ? 'selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>
-    <div id="list" class="grid"></div>`;
+    <div id="list" class="grid"></div>
+    <div id="caplist"></div>`;
   el.querySelectorAll('[data-f]').forEach((b) => b.onclick = () => { VIEW.filter = b.dataset.f; tabOrders(); });
   document.getElementById('q').oninput = draw;
   document.getElementById('sort').onchange = (e) => { VIEW.sort = e.target.value; store.set('lee.sort', VIEW.sort); draw(); };
@@ -639,7 +646,7 @@ async function onOrderClick(ev) {
 }
 
 function refreshStats() {
-  const act = R.orders.filter((o) => !o.cancelled);
+  const act = R.orders.filter((o) => !o.cancelled && !o.caption);   // caption orders: not in the round total
   const s = R.summary;
   s.paid = act.filter((o) => o.paid).length; s.shipped = act.filter((o) => o.shipped).length;
   s.fees = act.reduce((t, o) => t + o.fee, 0);
@@ -690,10 +697,13 @@ function tabPrep() {
   const el = document.getElementById('tab');
   const n = names();
   const codes = R.displayColumns.concat(Object.keys(R.prep).filter((c) => !R.displayColumns.includes(c)));
-  const rows = codes.filter((c) => R.prep[c]).map((c) => `<tr><td>${esc(n[c] || c)}</td><td class="n">${fmt(R.prep[c])}</td></tr>`).join('');
+  const pc = R.prepCaption || {};
+  const all = Object.keys(R.prep).concat(Object.keys(pc));
+  const rows = codes.concat(all.filter((c) => !codes.includes(c))).filter((c) => R.prep[c] || pc[c]).map((c) => `<tr><td>${esc(n[c] || c)}</td>
+    <td class="n">${fmt(R.prep[c] || 0)}${pc[c] ? `<div class="sub">+${fmt(pc[c])} แคปชั่น</div>` : ''}</td></tr>`).join('');
   const withNotes = R.orders.filter((o) => !o.cancelled && o.note);
   el.innerHTML = `
-    <div class="row noprint"><span class="sub">รวมทุกออเดอร์ที่ไม่ยกเลิก (รวมออเดอร์ในแคปชั่น)</span><span class="spacer"></span><button onclick="print()">🖨️ พิมพ์</button></div>
+    <div class="row noprint"><span class="sub">ตัวเลขใหญ่ = ออเดอร์จากคอมเมนต์ · "+N แคปชั่น" = ออเดอร์ในแคปชั่นที่ต้องทำเพิ่ม (แยกไว้ ไม่นับยอดรวม)</span><span class="spacer"></span><button onclick="print()">🖨️ พิมพ์</button></div>
     <h2>${esc(dateFull())} — ต้องเตรียม</h2>
     <table class="prep">${rows}</table>
     ${withNotes.length ? `<h2>ออเดอร์ที่มีหมายเหตุ (${withNotes.length})</h2><div class="grid">${withNotes.map((o) => `<div class="card"><b>@${esc(handleOf(o.user))}</b> — ${esc(o.note)}<div class="sub">${esc(itemsText(o))}</div></div>`).join('')}</div>` : ''}`;
@@ -888,7 +898,7 @@ async function viewCustomers() {
 async function viewCustomer(handle) {
   R = null;
   const c = await api('/api/customer/' + encodeURIComponent(handle));
-  const live = c.history.filter((h) => !h.cancelled);
+  const live = c.history.filter((h) => !h.cancelled && !h.caption);
   const total = live.reduce((t, h) => t + h.food, 0);
   $app.innerHTML = `<p style="margin:0 0 6px"><a href="#/customers">← ลูกค้าทั้งหมด</a></p>
     <h1 style="word-break:break-all">@${esc(c.handle)}</h1>
@@ -905,6 +915,7 @@ async function viewCustomer(handle) {
     <h2>ประวัติออเดอร์</h2>
     <div class="grid">${c.history.map((h) => `<a class="card ord ${h.cancelled ? 'cancelled' : ''}" href="#/r/${encodeURIComponent(h.round)}">
       <div class="row"><span class="who-line">${esc((h.label || '').split(' → ')[0])}</span><span class="pill">${esc(h.zip || '-')}</span><span class="spacer"></span><span class="amt">${baht(h.food)}</span></div>
+      ${h.caption ? '<div class="sub">📌 ออเดอร์ในแคปชั่น (ไม่นับยอดรวม)</div>' : ''}
       <div class="items">${esc(h.items.map(([n, q]) => `${n} ×${q}`).join(' · '))}</div>
       ${h.note ? `<div class="note-line">📌 ${esc(h.note)}</div>` : ''}</a>`).join('')}</div>`;
   const reload = () => viewCustomer(handle);

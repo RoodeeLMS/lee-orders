@@ -321,11 +321,13 @@ def round_view(rid):
                 'slips': slips.get(k, []),
                 'acts': {f: {'by': v[0], 'at': v[1], 'via': v[2]} for f, v in acts.get(k, {}).items()},
             })
-    active = [o for o in orders if not o['cancelled']]
-    prep = {}
-    for o in active:
+    prep, prep_cap = {}, {}          # food to cook: comment orders, and caption orders listed apart
+    for o in orders:
+        if o['cancelled']:
+            continue
+        tgt = prep_cap if o['caption'] else prep
         for k, q in o['items'].items():
-            prep[k] = prep.get(k, 0) + (q or 0)
+            tgt[k] = tgt.get(k, 0) + (q or 0)
     qs = questions(d)
     for q in qs:
         a = ans.get(q['id'])
@@ -339,15 +341,19 @@ def round_view(rid):
         'popupTitle': d.get('popupTitle'), 'payment': d.get('payment', {}),
         'menu': d.get('menu', []), 'displayColumns': d.get('displayColumns') or [m['code'] for m in d.get('menu', [])],
         'parsedAt': d.get('parsedAt'), 'source': d.get('source'), 'orders': orders, 'questions': qs, 'notes': notes,
-        'prep': prep, 'roundNotes': d.get('notes', []),
+        'prep': prep, 'prepCaption': prep_cap, 'roundNotes': d.get('notes', []),
         'summary': summarize(orders, qs, notes),
     }
 
 
 def summarize(orders, qs, notes):
-    act = [o for o in orders if not o['cancelled']]
+    # Khun Lee 14/10/2569: caption orders are kept apart and are NOT counted in the round total.
+    cap = [o for o in orders if o['caption'] and not o['cancelled']]
+    com = [o for o in orders if not o['caption']]
+    act = [o for o in com if not o['cancelled']]
     return {
-        'orders': len(act), 'cancelled': len(orders) - len(act),
+        'orders': len(act), 'cancelled': len(com) - len(act),
+        'captionOrders': len(cap), 'captionFood': sum(o['food'] for o in cap),
         'food': sum(o['food'] for o in act), 'fees': sum(o['fee'] for o in act),
         'paid': sum(1 for o in act if o['paid']), 'paidAmt': sum(o['total'] for o in act if o['paid']),
         'shipped': sum(1 for o in act if o['shipped']),
@@ -377,7 +383,7 @@ def customers():
         if not d:
             continue
         pr = prices(d)
-        for o in d.get('orders', []) + d.get('captionOrders', []):
+        for o in d.get('orders', []):          # caption orders are not counted (Khun Lee 14/10/2569)
             if o.get('cancelled'):
                 continue
             h = norm_u(o['user'])
@@ -410,7 +416,7 @@ def customer(handle):
             for o in lst:
                 if norm_u(o['user']) != h:
                     continue
-                hist.append({'round': r['id'], 'label': r.get('deliveryDateLabel', ''), 'status': r.get('status'),
+                hist.append({'round': r['id'], 'label': r.get('deliveryDateLabel', ''), 'status': r.get('status'), 'caption': cap,
                              'key': okey(o, cap), 'zip': o.get('zip', ''), 'cancelled': bool(o.get('cancelled')),
                              'items': [[names.get(k, k), q] for k, q in o.get('items', {}).items() if q],
                              'food': item_total(o.get('items', {}), pr), 'note': o.get('note')})
@@ -487,7 +493,7 @@ def analytics(rng):
         v = round_view(r['id'])
         if v['status'] == 'cancelled':
             continue
-        act = [o for o in v['orders'] if not o['cancelled']]
+        act = [o for o in v['orders'] if not o['cancelled'] and not o['caption']]
         names = {m['code']: m.get('short') or m.get('name') for m in d.get('menu', [])}
         pr = prices(d)
         new = 0
