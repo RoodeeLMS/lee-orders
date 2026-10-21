@@ -45,7 +45,9 @@ HTTP :8080
   POST /api/address {handle, id?, postal, name, phone, address, maps, round?, key?}   add (no id) / edit;
                      with round+key the new address is also chosen for that order
   GET  /api/addresses/<handle>  one customer's addresses (with ids)
-  POST /api/usage {action, round?, key?}   light activity log (app opened, slip opened, message copied)
+  POST /api/usage {action, round?, key?, detail?}   activity log: page views and (almost) every tap in the
+                     app - copies, filters, searches, Maps/call links... (shipping.csv is logged server-side)
+  GET  /api/address-audit?handle=   admins: every address-book change with before/after (app edits + syncs)
   GET  /api/usage-summary        admins: who uses the app, how often (last 7 / 30 days, per day)
   POST /api/address/delete {handle, id}
   POST /api/status   ... addr: <address id> | null   ships this order to that address
@@ -53,6 +55,8 @@ CLI (run by Claude through Portainer exec; everything it writes is attributed to
   python server.py inbox [since_epoch] [--mark]   JSON of events + open notes; --mark logs inbox_read
   python server.py log <kind> <round|-> [json] [--at epoch]   e.g. kind scan / sync
   python server.py note-done <id> [reply]
+  python server.py book-audit                     diff the synced address book vs the last sync -> addr_audit
+  python server.py addr-audit [handle]            the address audit trail as JSON
 """
 import csv, datetime, hashlib, io, json, os, re, sqlite3, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,7 +67,9 @@ DB = os.path.join(DATA, 'lee.db')
 SLIPS = os.path.join(DATA, 'slips')
 SLIP_MAX = 8 * 1024 * 1024
 ROUND_STATUSES = ('open', 'closed', 'delivered', 'cancelled')
-USAGE_ACTIONS = ('app_open', 'slip_open', 'copy_msg', 'copy_courier', 'copy_reminder')
+USAGE_ACTION = re.compile(r'[a-z][a-z0-9_]{1,40}')   # any app control (Nick 21/10: "track most function of the app")
+ADDR_FIELDS = ('postal', 'name', 'phone', 'address', 'maps')
+BOOK_SNAPSHOT = os.path.join(DATA, 'addrbook_audit_snapshot.json')
 SYSTEM_USER = 'claude'   # no Authelia account has this name, so the web side can never act as it
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -102,6 +108,9 @@ def init_db():
             maps TEXT, deleted INT DEFAULT 0, by TEXT, at INT, PRIMARY KEY(handle, postal));
         CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY, at INT, by TEXT, action TEXT, round_id TEXT, okey TEXT);
         CREATE INDEX IF NOT EXISTS usage_by_at ON usage(by, at);
+        CREATE TABLE IF NOT EXISTS addr_audit(id INTEGER PRIMARY KEY, at INT, by TEXT, source TEXT, handle TEXT,
+            sid TEXT, op TEXT, changed TEXT, before TEXT, after TEXT, round_id TEXT, okey TEXT);
+        CREATE INDEX IF NOT EXISTS addr_audit_handle ON addr_audit(handle, at);
         CREATE TABLE IF NOT EXISTS round_state(round_id TEXT PRIMARY KEY, status TEXT, by TEXT, at INT);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, at INT, by TEXT, kind TEXT, round_id TEXT,
             okey TEXT, ref TEXT, payload TEXT);
@@ -113,6 +122,8 @@ def migrate(c):
     cols = [r[1] for r in c.execute('PRAGMA table_info(status)')]
     if 'addr' not in cols:
         c.execute('ALTER TABLE status ADD COLUMN addr TEXT')
+    if 'detail' not in [r[1] for r in c.execute('PRAGMA table_info(usage)')]:
+        c.execute('ALTER TABLE usage ADD COLUMN detail TEXT')
     # addr_edits (keyed by postcode, 8/10/2569 morning) -> addr_slots (keyed by address id)
     for r in c.execute('SELECT * FROM addr_edits').fetchall():
         c.execute('INSERT OR IGNORE INTO addr_slots(handle,sid,postal,name,phone,address,maps,deleted,by,at) VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -125,6 +136,59 @@ def log_event(c, by, kind, round_id=None, okey=None, ref=None, payload=None):
     c.execute('INSERT INTO events(at,by,kind,round_id,okey,ref,payload) VALUES(?,?,?,?,?,?,?)',
               (int(time.time()), by, kind, round_id, okey, ref,
                json.dumps(payload, ensure_ascii=False) if payload is not None else None))
+
+
+def log_usage(c, by, action, round_id=None, okey=None, detail=None):
+    c.execute('INSERT INTO usage(at,by,action,round_id,okey,detail) VALUES(?,?,?,?,?,?)',
+              (int(time.time()), by, action, round_id or None, str(okey)[:200] if okey else None,
+               str(detail)[:300] if detail not in (None, '') else None))
+
+
+# ---------------------------------------------------------------- address audit
+# Every change to the address book is kept with its before/after values: edits made in the app
+# (source 'app') and changes that arrive with a sync of the book from Nick's PC (source 'sync').
+# Never pruned. Admins read it via /api/address-audit.
+def addr_slot(h, sid):
+    v = addrbook().get('byUser', {}).get(h, {}).get(sid)
+    return {k: v.get(k, '') or '' for k in ADDR_FIELDS} if v else None
+
+
+def log_addr_audit(c, by, source, h, sid, op, before, after, round_id=None, okey=None):
+    changed = [k for k in ADDR_FIELDS if (before or {}).get(k, '') != (after or {}).get(k, '')]
+    c.execute('INSERT INTO addr_audit(at,by,source,handle,sid,op,changed,before,after,round_id,okey) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+              (int(time.time()), by, source, h, sid, op, json.dumps(changed),
+               json.dumps(before, ensure_ascii=False) if before is not None else None,
+               json.dumps(after, ensure_ascii=False) if after is not None else None, round_id, okey))
+
+
+def book_audit():
+    """Diff the synced address book against the snapshot of the previous sync and log every added /
+    changed / removed address as SYSTEM_USER (source 'sync'). Run by board_sync.py after each upload."""
+    flat = lambda book: {(h, p): {k: (v.get(k) or '') if k != 'postal' else p for k in ADDR_FIELDS}
+                         for h, slots in book.get('byUser', {}).items() for p, v in slots.items()}
+    cur = flat(synced_addrbook())
+    try:
+        with open(BOOK_SNAPSHOT, encoding='utf-8') as f:
+            prev = {tuple(k.split('\t', 1)): v for k, v in json.load(f).items()}
+    except (OSError, ValueError):
+        prev = None
+    n = {'add': 0, 'edit': 0, 'delete': 0}
+    with LOCK, db() as c:
+        if prev is None:
+            log_addr_audit(c, SYSTEM_USER, 'sync', '-', '-', 'baseline', None, {'addresses': str(len(cur))})
+        else:
+            for k in sorted(set(cur) | set(prev)):
+                a, b = prev.get(k), cur.get(k)
+                op = 'add' if a is None else 'delete' if b is None else 'edit' if a != b else None
+                if op:
+                    log_addr_audit(c, SYSTEM_USER, 'sync', k[0], 's:' + k[1], op, a, b)
+                    n[op] += 1
+    tmp = BOOK_SNAPSHOT + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'\t'.join(k): v for k, v in cur.items()}, f, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, BOOK_SNAPSHOT)
+    print(json.dumps({'baseline': prev is None, 'addresses': len(cur), **n}))
 
 
 def image_ext(b):
@@ -656,6 +720,8 @@ class H(BaseHTTPRequestHandler):
             if m:
                 if round_data(m.group(1)) is None:
                     return self.send(404, {'error': 'no such round'})
+                with LOCK, db() as c:   # a plain link, so it is logged here rather than by the page
+                    log_usage(c, self.who()['user'] or 'unknown', 'csv_shipping', m.group(1))
                 return self.send(200, shipping_csv(m.group(1)), 'text/csv; charset=utf-8',
                                  {'Content-Disposition': 'attachment; filename="shipping-%s.csv"' % m.group(1)})
             m = re.fullmatch(r'/api/round/([^/]+)/history', path)
@@ -677,6 +743,17 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, usage_summary())
             if path == '/api/system':
                 return self.send(200, system_info())
+            if path == '/api/address-audit':     # admins: the address book's change history
+                if 'admins' not in self.who()['groups']:
+                    return self.send(403, {'error': 'admins only'})
+                h = norm_u((urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('handle') or [''])[0])
+                with db() as c:
+                    rows = [dict(r) for r in c.execute(
+                        'SELECT * FROM addr_audit WHERE (?=\'\' OR handle=?) ORDER BY id DESC LIMIT 500', (h, h))]
+                for r in rows:
+                    for k in ('changed', 'before', 'after'):
+                        r[k] = json.loads(r[k]) if r[k] else None
+                return self.send(200, rows)
             m = re.fullmatch(r'/api/round/([^/]+)', path)
             if m:
                 v = round_view(m.group(1))
@@ -769,12 +846,14 @@ class H(BaseHTTPRequestHandler):
                     if sid and not re.fullmatch(r'(s:\d{5}|a:[0-9a-f]{12})', sid):
                         return self.send(400, {'error': 'bad address id'})
                     now = int(time.time())
+                    before = addr_slot(h, sid) if sid else None   # read before writing, for the audit
                     _book['data'] = None          # the next lookup rebuilds the merged book
                     if path == '/api/address/delete':
                         if not sid:
                             return self.send(400, {'error': 'bad address id'})
                         c.execute('INSERT OR REPLACE INTO addr_slots(handle,sid,deleted,by,at) VALUES(?,?,1,?,?)', (h, sid, by, now))
                         log_event(c, by, 'addr_delete', None, None, h, {'handle': h, 'id': sid})
+                        log_addr_audit(c, by, 'app', h, sid, 'delete', before, None)
                         c.commit(); _book['data'] = None     # commit before replying: the app re-reads at once
                         return self.send(200, {'ok': True})
                     postal = str(b.get('postal') or '').strip()
@@ -792,6 +871,8 @@ class H(BaseHTTPRequestHandler):
                               (h, sid, postal, f['name'], f['phone'], f['address'], f['maps'], by, now))
                     log_event(c, by, 'addr_edit', None, None, h, {'handle': h, 'id': sid, 'postal': postal, 'new': new})
                     rid, k = b.get('round'), b.get('key')
+                    log_addr_audit(c, by, 'app', h, sid, 'add' if new else 'edit', before, dict(f, postal=postal),
+                                   rid if round_data(rid) is not None else None, k if k else None)
                     if new and rid and k and round_data(rid) is not None:   # added from an order: ship that order there
                         cur = c.execute('SELECT * FROM status WHERE round_id=? AND okey=?', (rid, k)).fetchone()
                         cur = dict(cur) if cur else {'paid': 0, 'shipped': 0, 'fee': None}
@@ -801,11 +882,10 @@ class H(BaseHTTPRequestHandler):
                     c.commit(); _book['data'] = None
                     return self.send(200, {'ok': True, 'id': sid})
                 if path == '/api/usage':
-                    act = b.get('action')
-                    if act not in USAGE_ACTIONS:
+                    act = str(b.get('action') or '')
+                    if not USAGE_ACTION.fullmatch(act):
                         return self.send(400, {'error': 'bad action'})
-                    c.execute('INSERT INTO usage(at,by,action,round_id,okey) VALUES(?,?,?,?,?)',
-                              (int(time.time()), by, act, (b.get('round') or None), (str(b.get('key'))[:200] if b.get('key') else None)))
+                    log_usage(c, by, act, str(b.get('round') or '')[:60], b.get('key'), b.get('detail'))
                     return self.send(200, {'ok': True})
                 if path == '/api/round-status':
                     rid, status = b.get('round'), b.get('status')
@@ -957,6 +1037,15 @@ if __name__ == '__main__':
         sys.stdout.reconfigure(encoding='utf-8')
         with db() as c:
             print(json.dumps([dict(r) for r in c.execute('SELECT * FROM addr_slots ORDER BY at')], ensure_ascii=False))
+        sys.exit(0)
+    if argv and argv[0] == 'book-audit':   # after a sync: log what changed in the synced address book
+        book_audit()
+        sys.exit(0)
+    if argv and argv[0] == 'addr-audit':   # addr-audit [handle] - the audit trail as JSON
+        sys.stdout.reconfigure(encoding='utf-8')
+        with db() as c:
+            q = 'SELECT * FROM addr_audit' + (' WHERE handle=?' if len(argv) > 1 else '') + ' ORDER BY id'
+            print(json.dumps([dict(r) for r in c.execute(q, tuple(argv[1:2]))], ensure_ascii=False))
         sys.exit(0)
     if argv and argv[0] == 'note-done':    # note-done <id> [reply]
         with db() as c:

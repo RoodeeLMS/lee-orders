@@ -20,14 +20,62 @@ async function api(path, body) {
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || ('HTTP ' + r.status));
   return r.json();
 }
-// Light activity log (app opened / slip opened / message copied) so we can tell whether the app is
-// really in use before retiring the old site. Fire-and-forget: never blocks or breaks the UI.
-function track(action, round, key) {
+// Activity log: page views and (almost) every tap, so Nick can see how the app is really used
+// (21/10/2569 "track most function of the app"). Fire-and-forget: never blocks or breaks the UI.
+function track(action, round, key, detail) {
   try {
     fetch('/api/usage', { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, round: round || null, key: key || null }) }).catch(() => {});
+      body: JSON.stringify({ action, round: round || null, key: key || null, detail: detail ?? null }) }).catch(() => {});
   } catch (e) { /* ignore */ }
 }
+
+// One delegated listener names each tap from the control's data-* attribute or link, so new buttons are
+// tracked without wiring each one. Runs in the capture phase, before the view's own handler.
+const TAP_ALIAS = { copymsg: 'copy_msg', copyrem: 'copy_reminder', copydel: 'copy_courier' };
+const TAP_ATTRS = { f: 'filter', cf: 'customer_filter', hf: 'history_filter', rg: 'stats_range', rs: 'round_status_tap',
+  opt: 'answer_option', send: 'answer_send', done: 'note_done', all: 'copy_courier_all', hide: 'ship_hide_shipped',
+  afAct: 'addr_form', edit: 'addr_edit_open', pick: 'addr_pick', slip: 'slip_image_view', x: 'slip_viewer_close', del: 'slip_delete_tap' };
+const TAP_IDS = { addAddr: 'addr_add_open', ns: 'note_send_round', gs: 'note_send_general' };
+function tapName(el) {
+  const d = el.dataset;
+  if (d.pop) return [TAP_ALIAS[d.pop] || 'pop_' + d.pop];
+  if (d.act) return d.act === 'open' ? null : [TAP_ALIAS[d.act] || 'act_' + d.act];   // 'open' = slip_open, logged in openPopup
+  for (const [k, name] of Object.entries(TAP_ATTRS)) if (d[k] !== undefined) return [name, d[k] || null];
+  if (TAP_IDS[el.id]) return [TAP_IDS[el.id]];
+  const href = el.getAttribute('href') || '';
+  if (el.tagName === 'A') {
+    if (!href || href.startsWith('#') || href.includes('shipping.csv')) return null;   // views are logged by route(); CSV by the server
+    if (href.startsWith('tel:')) return ['call'];
+    if (/instagram\.com/.test(href)) return ['open_instagram'];
+    if (/maps|goo\.gl/.test(href)) return ['open_maps'];
+    return ['open_link', href.slice(0, 120)];
+  }
+  if (/print\(\)/.test(el.getAttribute('onclick') || '')) return ['print'];
+  if (el.tagName === 'SUMMARY') return ['expand', el.textContent.trim().slice(0, 60)];
+  return ['tap', el.textContent.trim().slice(0, 60)];
+}
+document.addEventListener('click', (ev) => {
+  const el = ev.target.closest('button, a, summary, img[data-slip]');
+  if (!el) return;
+  const n = tapName(el);
+  if (!n) return;
+  const card = el.closest('[data-key]');
+  const key = POP && el.closest('.modal, .viewer') ? POP.o.key : card ? card.dataset.key : null;
+  let [action, detail] = n;
+  if (action === 'copy_courier_all') detail = (VIEW.listKeys || []).length;
+  track(action, R && R.id, key, detail);
+}, true);
+// Searches (once the typing pauses) and sort changes.
+let searchTimer;
+document.addEventListener('input', (ev) => {
+  const t = ev.target;
+  if (t.type !== 'search') return;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { if (t.value.trim()) track(t.id === 'cq' ? 'search_customers' : 'search_orders', R && R.id, null, t.value.trim()); }, 1500);
+}, true);
+document.addEventListener('change', (ev) => {
+  if (ev.target.id === 'sort') track('sort', R && R.id, null, ev.target.value);
+}, true);
 
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -68,6 +116,9 @@ async function route() {
     (a.dataset.nav === 'customers' && (parts[0] === 'customers' || parts[0] === 'c')) ||
     (a.dataset.nav === 'notes' && parts[0] === 'notes') ||
     (a.dataset.nav === 'stats' && parts[0] === 'stats')));
+  const page = { r: 'round', c: 'customer' }[parts[0]] || parts[0] || 'rounds';
+  track('view_' + (/^[a-z]+$/.test(page) ? page : 'other'), parts[0] === 'r' ? parts[1] : null,
+    parts[0] === 'c' ? parts[1] : null, parts[0] === 'r' ? parts[2] || 'orders' : null);
   try {
     SYS = await api('/api/system').catch(() => ({}));
     if (!parts.length) return await viewRounds();
@@ -468,6 +519,7 @@ function popStep(d) {
 const repaintPopup = () => { if (POP) openPopup(POP.o); };
 function onPopKey(e) {
   if (!POP || /INPUT|TEXTAREA/.test((e.target || {}).tagName || '')) return;
+  if (['Escape', 'ArrowLeft', 'ArrowRight'].includes(e.key)) track('pop_key', R && R.id, POP.o.key, e.key);
   if (e.key === 'Escape') closePopup();
   if (e.key === 'ArrowLeft') popStep(-1);
   if (e.key === 'ArrowRight') popStep(1);
@@ -503,7 +555,7 @@ async function popCopy(text, label) {
   toast(label);
 }
 async function onPopClick(e) {
-  if (e.target === POP.el) return closePopup();
+  if (e.target === POP.el) { track('pop_close_backdrop', R && R.id, POP.o.key); return closePopup(); }
   if (await addrFormClick(e, handleOf(POP.o.user).toLowerCase(), async (changed) => {
     if (changed) { POP.addrs = null; await refreshRound(); }
     repaintPopup();
@@ -527,9 +579,9 @@ async function onPopClick(e) {
     if (act === 'close') return closePopup();
     if (act === 'prev') return popStep(-1);
     if (act === 'next') return popStep(1);
-    if (act === 'copymsg') { track('copy_msg', R.id, o.key); return popCopy(customerMessage(o), 'คัดลอกข้อความแล้ว ✓'); }
-    if (act === 'copyrem') { track('copy_reminder', R.id, o.key); return popCopy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓'); }
-    if (act === 'copydel') track('copy_courier', R.id, o.key);
+    // copy_msg / copy_reminder / copy_courier are logged by the page-wide tap tracker
+    if (act === 'copymsg') return popCopy(customerMessage(o), 'คัดลอกข้อความแล้ว ✓');
+    if (act === 'copyrem') return popCopy(reminderMessage(o), 'คัดลอกข้อความทวงยอดแล้ว ✓');
     if (act === 'copydel') return popCopy(deliveryText(o), o.address ? 'คัดลอกข้อความคนส่งแล้ว ✓' : 'คัดลอกแล้ว ✓ (ยังไม่มีที่อยู่ในสมุด)');
     if (act === 'editaddr') {   // edit the address this order currently ships to
       POP.el.querySelector('.del-body').innerHTML = addrFormHtml(o.address, o.zip);
@@ -917,7 +969,9 @@ async function viewCustomer(handle) {
       <div class="row"><span class="who-line">${esc((h.label || '').split(' → ')[0])}</span><span class="pill">${esc(h.zip || '-')}</span><span class="spacer"></span><span class="amt">${baht(h.food)}</span></div>
       ${h.caption ? '<div class="sub">📌 ออเดอร์ในแคปชั่น (ไม่นับยอดรวม)</div>' : ''}
       <div class="items">${esc(h.items.map(([n, q]) => `${n} ×${q}`).join(' · '))}</div>
-      ${h.note ? `<div class="note-line">📌 ${esc(h.note)}</div>` : ''}</a>`).join('')}</div>`;
+      ${h.note ? `<div class="note-line">📌 ${esc(h.note)}</div>` : ''}</a>`).join('')}</div>
+    <div id="addrAudit"></div>`;
+  if (isAdmin()) addrAuditHtml(c.handle).then((h) => { const el = document.getElementById('addrAudit'); if (el) el.innerHTML = h; });
   const reload = () => viewCustomer(handle);
   const lastZip = (live[0] || {}).zip || '';
   document.getElementById('addAddr').onclick = () => {
@@ -932,6 +986,21 @@ async function viewCustomer(handle) {
       e.closest('.card').innerHTML = addrFormHtml(a);
     }
   };
+}
+
+// Admins only: every change to this customer's addresses, with what it was before (the address audit).
+const AUDIT_OP = { add: '＋ เพิ่ม', edit: '✏️ แก้', delete: '🗑 ลบ' };
+const AUDIT_FIELD = { postal: 'ปณ.', name: 'ชื่อ', phone: 'โทร', address: 'ที่อยู่', maps: 'Maps' };
+async function addrAuditHtml(handle) {
+  let rows;
+  try { rows = await api('/api/address-audit?handle=' + encodeURIComponent(handle)); } catch (e) { return ''; }
+  if (!rows.length) return '';
+  const diff = (r) => (r.op === 'edit' ? r.changed : Object.keys(AUDIT_FIELD).filter((k) => (r.before || r.after || {})[k]))
+    .map((k) => `<div class="sub">${AUDIT_FIELD[k] || k}: ${r.before ? `<s>${esc(r.before[k] || '—')}</s> ` : ''}${r.after ? `→ <b>${esc(r.after[k] || '—')}</b>` : ''}</div>`).join('');
+  return `<h2>ประวัติแก้ที่อยู่ <span class="sub">(เฉพาะแอดมินเห็น)</span></h2>
+    <div class="hist">${rows.map((r) => `<div class="hrow ${r.by === SYSTEM_USER ? 'bot' : ''}"><div class="hwhen">${when(r.at)}</div>
+      <div>${whoHtml(r.by)} ${AUDIT_OP[r.op] || esc(r.op)} ที่อยู่ ${esc(((r.after || r.before || {}).postal) || '')}${r.source === 'sync' ? ' <span class="sub">(จากสมุดที่อยู่ที่ซิงก์)</span>' : ''}${r.okey ? ` <span class="sub">· จากออเดอร์ ${esc(handleOf(r.okey))}</span>` : ''}
+        ${r.op === 'edit' && !r.changed.length ? '<div class="sub">บันทึกโดยไม่เปลี่ยนข้อมูล</div>' : diff(r)}</div></div>`).join('')}</div>`;
 }
 
 /* ----------------------------------------------------------------- notes */
@@ -996,7 +1065,11 @@ function timingCards(a) {
 
 const USAGE_LABEL = { app_open: 'เปิดแอป', slip_open: 'เปิดสลิป', copy_msg: 'คัดลอกข้อความ', copy_courier: 'คัดลอกคนส่ง',
   copy_reminder: 'คัดลอกทวงยอด', status: 'ติ๊กจ่าย/ส่ง/ค่าส่ง', slip: 'แนบสลิป', answer: 'ตอบคำถาม', note: 'ฝากโน้ต',
-  addr_edit: 'แก้ที่อยู่', addr_delete: 'ลบที่อยู่', round_status: 'เปลี่ยนสถานะรอบ' };
+  addr_edit: 'แก้ที่อยู่', addr_delete: 'ลบที่อยู่', round_status: 'เปลี่ยนสถานะรอบ',
+  csv_shipping: 'โหลด CSV ส่งของ', copy_courier_all: 'คัดลอกคนส่งทั้งหมด', view_rounds: 'หน้ารอบ', view_round: 'เปิดรอบ',
+  view_customers: 'หน้าลูกค้า', view_customer: 'เปิดลูกค้า', view_notes: 'หน้าข้อความ', view_stats: 'หน้าสถิติ',
+  search_orders: 'ค้นออเดอร์', search_customers: 'ค้นลูกค้า', filter: 'กรอง', sort: 'เรียง', call: 'โทร', open_maps: 'เปิด Maps',
+  open_instagram: 'เปิด IG', print: 'พิมพ์', addr_pick: 'เลือกที่อยู่ส่ง', slip_image_view: 'ดูรูปสลิป' };
 async function usageCard() {
   if (!isAdmin()) return '';
   let rows;
@@ -1012,7 +1085,7 @@ async function usageCard() {
   };
   return `<div class="card"><h3>📱 การใช้งานแอป (เฉพาะแอดมินเห็น)</h3>
     ${rows.length ? rows.map(person).join('') : '<div class="sub">ยังไม่มีใครใช้งานใน 30 วัน</div>'}
-    <p class="sub" style="margin:8px 0 0">นับ: เปิดแอป · เปิดสลิป · คัดลอก · ติ๊ก · แนบสลิป · ตอบคำถาม · โน้ต · แก้ที่อยู่ — ใช้ดูว่าพร้อมปิดเว็บเดิมหรือยัง</p></div>`;
+    <p class="sub" style="margin:8px 0 0">นับทุกหน้าที่เปิดและเกือบทุกปุ่มที่แตะ (คัดลอก · ติ๊ก · แนบสลิป · ค้นหา · CSV · Maps · โทร · แก้ที่อยู่ …) — ใช้ดูว่าแอปถูกใช้อย่างไร</p></div>`;
 }
 
 async function viewStats() {
